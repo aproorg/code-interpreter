@@ -153,6 +153,21 @@ COPY api/src/hosted-app-launcher.sh /usr/local/bin/codeapi-hosted-app-launcher
 RUN chmod +x ./entrypoint.sh /usr/local/bin/codeapi-hosted-app-launcher
 
 # ============================================================================
+# Stage 1c: Standalone Python 3.14.4 environment
+# ============================================================================
+FROM ghcr.io/astral-sh/uv:debian AS python-builder
+
+RUN uv python install 3.14.4 && \
+    PY_DIR=$(dirname $(dirname $(uv python find 3.14.4))) && \
+    mkdir -p /pkgs/python/3.14.4 && \
+    cp -a "${PY_DIR}/." /pkgs/python/3.14.4/ && \
+    uv pip install --break-system-packages --python /pkgs/python/3.14.4/bin/python3 \
+      numpy pandas matplotlib scipy openpyxl pillow sympy && \
+    printf '{\n    "language": "python",\n    "version": "3.14.4",\n    "build_platform": "docker-debian",\n    "aliases": ["py", "py3", "python3", "python-3.14"]\n}\n' > /pkgs/python/3.14.4/pkg-info.json && \
+    printf '#!/bin/bash\nSCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"\n"${SCRIPT_DIR}/bin/python3" "$@"\n' > /pkgs/python/3.14.4/run && \
+    chmod +x /pkgs/python/3.14.4/run
+
+# ============================================================================
 # Stage 2b: AWS Lambda MicroVM container base image
 #
 # Lambda MicroVM IS the VM boundary: no libkrun launcher, no guest kernel.
@@ -165,6 +180,14 @@ RUN chmod +x ./entrypoint.sh /usr/local/bin/codeapi-hosted-app-launcher
 FROM sandbox-build AS lambda-microvm-runner
 
 COPY --from=package-builder /pkgs /pkgs
+COPY --from=python-builder /pkgs/python /pkgs/python
+
+RUN ln -sf /pkgs/python/3.14.4/bin/python3 /usr/bin/python3 && \
+    ln -sf /pkgs/python/3.14.4/bin/python3 /usr/bin/python && \
+    ln -sf /pkgs/python/3.14.4/bin/pip3 /usr/bin/pip3 && \
+    ln -sf /pkgs/python/3.14.4/bin/pip3 /usr/bin/pip && \
+    ln -sf /pkgs/node/24.15.0/bin/node /usr/bin/node && \
+    ln -sf /pkgs/bun/1.3.14/bin/bun /usr/bin/bun
 
 ENV PORT=8080 \
     SANDBOX_PACKAGES_DIRECTORY=/pkgs \
