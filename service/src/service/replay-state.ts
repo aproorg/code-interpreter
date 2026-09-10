@@ -319,8 +319,20 @@ export function normalizeExecutionState(state: ExecutionState): ExecutionState {
   return state;
 }
 
+function execStateKey(execution_id: string): string {
+  return `exec_state:{${execution_id}}`;
+}
+
+function execResultKey(execution_id: string): string {
+  return `exec_result:{${execution_id}}`;
+}
+
+function execLockKey(execution_id: string): string {
+  return `exec_lock:{${execution_id}}`;
+}
+
 export async function getExecutionState(execution_id: string): Promise<ExecutionState | null> {
-  const data = await redis.get(`exec_state:${execution_id}`);
+  const data = await redis.get(execStateKey(execution_id));
   return data != null ? normalizeExecutionState(JSON.parse(data) as ExecutionState) : null;
 }
 
@@ -335,7 +347,7 @@ export async function setExecutionState(state: ExecutionState): Promise<void> {
     );
   }
   await redis.set(
-    `exec_state:${state.execution_id}`,
+    execStateKey(state.execution_id),
     serialized,
     'EX',
     EXECUTION_STATE_TTL,
@@ -343,7 +355,7 @@ export async function setExecutionState(state: ExecutionState): Promise<void> {
 }
 
 export async function deleteExecutionState(execution_id: string): Promise<void> {
-  await redis.del(`exec_state:${execution_id}`);
+  await redis.del(execStateKey(execution_id));
 }
 
 // ---------------------------------------------------------------------------
@@ -358,7 +370,7 @@ export async function deleteExecutionState(execution_id: string): Promise<void> 
 export async function acquireExecutionLock(execution_id: string): Promise<string | null> {
   const token = nanoid();
   const result = await redis.set(
-    `exec_lock:${execution_id}`,
+    execLockKey(execution_id),
     token,
     'PX',
     REPLAY_LOCK_TTL_MS,
@@ -369,7 +381,7 @@ export async function acquireExecutionLock(execution_id: string): Promise<string
 
 export async function releaseExecutionLock(execution_id: string, token: string): Promise<void> {
   try {
-    await redis.releaseExecutionLockScript(`exec_lock:${execution_id}`, token);
+    await redis.releaseExecutionLockScript(execLockKey(execution_id), token);
   } catch (err) {
     logger.warn('Failed to release exec lock', { execution_id, err });
   }
@@ -419,7 +431,7 @@ export async function scanKeys(
  * on the lighter `exec_state:` blob the replay path mutates on every
  * continuation. */
 function blockingResultKey(execution_id: string): string {
-  return `exec_result:${execution_id}`;
+  return execResultKey(execution_id);
 }
 
 export async function setBlockingResult(execution_id: string, result: t.ExecuteResult): Promise<void> {
@@ -456,8 +468,8 @@ export async function deleteBlockingResult(execution_id: string): Promise<void> 
  * and the result blob in a single hop. If cleanup has already removed the
  * state, the entire update is skipped. */
 export async function setExecutionResult(execution_id: string, result: t.ExecuteResult): Promise<void> {
-  const stateKey = `exec_state:${execution_id}`;
-  const resultKey = `exec_result:${execution_id}`;
+  const stateKey = execStateKey(execution_id);
+  const resultKey = execResultKey(execution_id);
   const existing = await getExecutionState(execution_id);
   if (!existing) return;
   const updated: ExecutionState = { ...existing, jobCompleted: true, jobResult: undefined };
@@ -483,7 +495,7 @@ export async function setExecutionResult(execution_id: string, result: t.Execute
 }
 
 export async function setExecutionError(execution_id: string, error: Error): Promise<void> {
-  const stateKey = `exec_state:${execution_id}`;
+  const stateKey = execStateKey(execution_id);
   const existing = await getExecutionState(execution_id);
   if (!existing) return;
   const updated: ExecutionState = { ...existing, jobCompleted: true, jobError: error.message };
@@ -507,7 +519,7 @@ export async function setExecutionError(execution_id: string, error: Error): Pro
 // ---------------------------------------------------------------------------
 
 export function historyKey(execution_id: string): string {
-  return `tool_history:${execution_id}`;
+  return `tool_history:{${execution_id}}`;
 }
 
 /** Canonical byte-comparable form of the "semantic" fields of a history
@@ -651,7 +663,7 @@ export async function commitToolHistoryAndState(
     );
   }
   const hKey = historyKey(state.execution_id);
-  const sKey = `exec_state:${state.execution_id}`;
+  const sKey = execStateKey(state.execution_id);
   const tx = redis.multi();
   if (delta.serializedByCallId.size > 0) {
     const kvs: string[] = [];
@@ -694,7 +706,7 @@ export async function commitToolHistoryAndState(
  * the sandbox to re-emit earlier calls on replay. */
 export async function refreshExecutionTtl(execution_id: string): Promise<void> {
   await Promise.all([
-    redis.expire(`exec_state:${execution_id}`, EXECUTION_STATE_TTL),
+    redis.expire(execStateKey(execution_id), EXECUTION_STATE_TTL),
     redis.expire(historyKey(execution_id), EXECUTION_STATE_TTL),
   ]);
 }
@@ -764,7 +776,8 @@ export async function cleanupStaleExecutions(): Promise<number> {
            * of malformed keys (corrupt writes, mid-deploy migrations) is
            * visible to operators via both `ptc_replay_stale_cleanups_total`
            * and structured logs, instead of silently disappearing. */
-          const orphanId = batchKeys[i].slice('exec_state:'.length);
+          const rawSuffix = batchKeys[i].slice('exec_state:'.length);
+          const orphanId = rawSuffix.replace(/^\{|\}$/g, '');
           logger.warn('Reaping malformed exec_state and sibling keys', {
             execution_id: orphanId,
           });

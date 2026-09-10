@@ -21,7 +21,7 @@ COPY shared /shared
 COPY packages/code/src /packages/code/src
 COPY service/tsconfig.json ./
 RUN bun build ./src/file-server.ts --minify --outdir .build --target bun --external '@opentelemetry/*'
-RUN bun build ./src/api-server.ts --minify --outdir .build-api --target bun --external '@opentelemetry/*'
+RUN bun build ./src/service-api.ts --minify --outdir .build-api --target bun --external '@opentelemetry/*'
 RUN bun build ./scripts/rehydrate-session-cache.ts --minify --outdir .build-migrations --target bun --external '@opentelemetry/*'
 RUN bun build ./src/worker-server.ts --minify --outdir .build-worker --target bun --external '@opentelemetry/*'
 RUN bun build ./src/egress-gateway.ts --minify --outdir .build-egress-gateway --target bun --external '@opentelemetry/*'
@@ -42,7 +42,7 @@ COPY --from=install /temp/prod/node_modules ./node_modules
 COPY --from=builder /app/.build-api ./.build-api
 COPY --from=builder /app/.build-migrations ./.build-migrations
 COPY --from=builder /app/src/*.py ./src/
-CMD ["bun", "run", ".build-api/api-server.js"]
+CMD ["bun", "run", ".build-api/service-api.js"]
 
 # Worker server (job processor, health on port 3113)
 FROM oven/bun:1.4.2 AS worker

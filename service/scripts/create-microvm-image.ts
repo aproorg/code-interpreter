@@ -107,9 +107,7 @@ const shared = {
   baseImageVersion,
   buildRoleArn,
   codeArtifact: { uri: artifactUri },
-  cpuConfigurations: [{ architecture: 'ARM_64' as const }],
   resources: [{ minimumMemoryInMiB: memory }],
-  additionalOsCapabilities: ['ALL' as const],
   environmentVariables: { SANDBOX_USE_CGROUPV2: 'false', ...parseEnvJson() },
 };
 

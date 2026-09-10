@@ -339,6 +339,9 @@ export async function startServer(app: Express, callback?: () => Promise<void>):
       await callback();
     }
   } catch (error) {
+    try {
+      require('fs').writeSync(2, `FATAL Failed to start server: ${error instanceof Error ? error.stack || error.message : String(error)}\n`);
+    } catch {}
     logger.error('Failed to start server:', error);
     process.exit(1);
   }

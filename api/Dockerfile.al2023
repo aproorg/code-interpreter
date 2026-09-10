@@ -1,0 +1,76 @@
+# Stage 1: Build NsJail on AL2023
+FROM public.ecr.aws/lambda/microvms:al2023-minimal AS nsjail-builder
+
+RUN dnf install -y git gcc gcc-c++ make bison flex protobuf-devel libnl3-devel pkgconfig glibc-static libstdc++-static && dnf clean all
+
+WORKDIR /nsjail
+RUN git clone -b master --single-branch https://github.com/google/nsjail.git . \
+    && git checkout 66ad78dc361721512fbf9470488e584364c75489 \
+    && git submodule update --init --recursive \
+    && make -j$(nproc)
+
+COPY api/src/spec-guard.c /tmp/spec-guard.c
+COPY docker/rootfs-setup.c /tmp/rootfs-setup.c
+RUN gcc -O2 -static -o /usr/local/bin/spec-guard /tmp/spec-guard.c \
+    && gcc -O2 -static -o /usr/local/bin/sandbox-rootfs-setup /tmp/rootfs-setup.c \
+    && chmod 0111 /usr/local/bin/spec-guard /usr/local/bin/sandbox-rootfs-setup
+
+# Stage 2: Runtime image on AL2023
+FROM public.ecr.aws/lambda/microvms:al2023-minimal AS lambda-microvm-runner
+
+RUN dnf install -y \
+    unzip tar gzip shadow-utils procps-ng iptables bc jq \
+    python3.12 python3.12-pip python3.12-devel nodejs \
+    protobuf libnl3 ca-certificates \
+    && dnf clean all \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python3 \
+    && ln -sf /usr/bin/python3.12 /usr/bin/python \
+    && ln -sf /usr/bin/pip3.12 /usr/bin/pip3 \
+    && ln -sf /usr/bin/pip3.12 /usr/bin/pip
+
+# Install common Python data science packages
+RUN pip3.12 install --no-cache-dir numpy pandas matplotlib seaborn scipy sympy pillow requests
+
+# Install Bun
+RUN curl -fsSL https://bun.sh/install | bash \
+    && cp /root/.bun/bin/bun /usr/local/bin/bun \
+    && ln -sf /usr/local/bin/bun /usr/bin/bun
+
+# Copy compiled NsJail binaries
+COPY --from=nsjail-builder /nsjail/nsjail /usr/sbin/nsjail
+COPY --from=nsjail-builder /usr/local/bin/spec-guard /usr/local/bin/spec-guard
+COPY --from=nsjail-builder /usr/local/bin/sandbox-rootfs-setup /usr/local/bin/sandbox-rootfs-setup
+RUN chmod +x /usr/sbin/nsjail
+
+WORKDIR /sandbox_api
+
+COPY api/package.json api/bun.lock ./
+RUN bun install --frozen-lockfile
+
+COPY api/tsconfig.json ./
+COPY api/src ./src
+COPY shared /shared
+COPY api/config ./config
+
+RUN bun run build
+
+# Remove cgroup requirements from sandbox.cfg for compatibility with Firecracker MicroVM
+RUN sed -i '/^cgroup_/d' /sandbox_api/config/sandbox.cfg
+
+# Set up runtime packages in /pkgs
+COPY api/src/setup-pkgs.sh /tmp/setup-pkgs.sh
+RUN /tmp/setup-pkgs.sh && rm /tmp/setup-pkgs.sh
+
+RUN mkdir -p /tmp/sandbox && chmod 777 /tmp/sandbox
+
+COPY api/src/runner-bootstrap.sh /sandbox_api/runner-bootstrap.sh
+RUN chmod +x /sandbox_api/runner-bootstrap.sh
+
+ENV PORT=8080 \
+    SANDBOX_PACKAGES_DIRECTORY=/pkgs \
+    SANDBOX_SESSION_WORKSPACE_ENABLED=true \
+    SANDBOX_USE_CGROUPV2=false \
+    SANDBOX_MAX_OPEN_FILES=1024
+
+EXPOSE 8080/tcp
+CMD ["/sandbox_api/runner-bootstrap.sh"]

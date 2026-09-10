@@ -61,10 +61,10 @@ export interface RuntimeSessionRecord {
   hosted_app?: HostedAppRecordDetails;
 }
 
-const SESS_PREFIX = 'rtsx:sess:';
-const LOCK_PREFIX = 'rtsx:lock:';
-const GEN_PREFIX = 'rtsx:gen:';
-const CKPT_SEQ_PREFIX = 'rtsx:ckptseq:';
+export const sessKey = (id: string): string => `rtsx:{${id}}:sess`;
+export const lockKey = (id: string): string => `rtsx:{${id}}:lock`;
+export const genKey = (id: string): string => `rtsx:{${id}}:gen`;
+export const ckptSeqKey = (id: string): string => `rtsx:{${id}}:ckptseq`;
 
 /** BullMQ requires its worker connection to use `maxRetriesPerRequest: null`,
  * so a live-but-unresponsive Redis socket can otherwise leave a direct
@@ -294,7 +294,7 @@ export async function acquireRuntimeSessionLock(
   try {
     result = await runRegistryCommand(
       'Runtime session lock acquire',
-      () => redis.set(`${LOCK_PREFIX}${runtimeSessionId}`, token, 'PX', ttlMs, 'NX'),
+      () => redis.set(lockKey(runtimeSessionId), token, 'PX', ttlMs, 'NX'),
       options,
       /* A caller-side deadline cannot cancel ioredis. The original SET may
        * have succeeded even if an automatic replay eventually resolves null,
@@ -404,7 +404,7 @@ export async function releaseRuntimeSessionLock(
     try {
       await runRegistryCommand(
         'Runtime session lock release',
-        () => redis.releaseRuntimeSessionLockScript(`${LOCK_PREFIX}${runtimeSessionId}`, token),
+        () => redis.releaseRuntimeSessionLockScript(lockKey(runtimeSessionId), token),
         { signal: options.signal, timeoutMs: remainingMs },
       );
       return;
@@ -453,7 +453,7 @@ export async function renewRuntimeSessionLock(
     const result = await runRegistryCommand(
       'Runtime session lock renewal',
       () => redis.renewRuntimeSessionLockScript(
-        `${LOCK_PREFIX}${runtimeSessionId}`,
+        lockKey(runtimeSessionId),
         token,
         String(ttlMs),
       ),
@@ -475,7 +475,7 @@ export async function readRuntimeSessionRecord(
 ): Promise<RuntimeSessionRecord | null> {
   const data = await runRegistryCommand(
     'Runtime session record read',
-    () => redis.get(`${SESS_PREFIX}${runtimeSessionId}`),
+    () => redis.get(sessKey(runtimeSessionId)),
     options,
   );
   if (data == null) return null;
@@ -502,8 +502,8 @@ export async function writeRuntimeSessionRecord(
     const result = await runRegistryCommand(
       'Runtime session record write',
       () => redis.writeRuntimeSessionRecordScript(
-        `${SESS_PREFIX}${record.runtime_session_id}`,
-        `${LOCK_PREFIX}${record.runtime_session_id}`,
+        sessKey(record.runtime_session_id),
+        lockKey(record.runtime_session_id),
         lockToken,
         JSON.stringify(record),
         String(ttlSeconds),
@@ -533,7 +533,7 @@ export async function allocateRuntimeSessionGeneration(
   if (!Number.isSafeInteger(initialGeneration) || initialGeneration < 1) {
     throw new Error('Runtime session generation must be a positive safe integer');
   }
-  const key = `${GEN_PREFIX}${runtimeSessionId}`;
+  const key = genKey(runtimeSessionId);
   const rawGeneration = await runRegistryCommand(
     'Runtime session generation allocation',
     () => redis.allocateRuntimeSessionGenerationScript(
@@ -561,7 +561,7 @@ export async function allocateCheckpointSequence(
   retainedMax = 0,
   options: RuntimeSessionRedisCommandOptions = {},
 ): Promise<number> {
-  const key = `${CKPT_SEQ_PREFIX}${runtimeSessionId}`;
+  const key = ckptSeqKey(runtimeSessionId);
   return runRegistryCommand(
     'Runtime session checkpoint sequence allocation',
     () => redis.allocateCheckpointSequenceScript(
@@ -583,8 +583,8 @@ export async function removeRuntimeSession(
   const result = await runRegistryCommand(
     'Runtime session record removal',
     () => redis.removeRuntimeSessionScript(
-      `${SESS_PREFIX}${runtimeSessionId}`,
-      `${LOCK_PREFIX}${runtimeSessionId}`,
+      sessKey(runtimeSessionId),
+      lockKey(runtimeSessionId),
       lockToken,
     ),
     options,

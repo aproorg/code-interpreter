@@ -81,10 +81,10 @@ function ackHook(hook: string) {
   };
 }
 
-lifecycleRouter.post('/ready', ackHook('ready'));
-lifecycleRouter.post('/validate', ackHook('validate'));
+lifecycleRouter.all('/ready', ackHook('ready'));
+lifecycleRouter.all('/validate', ackHook('validate'));
 
-lifecycleRouter.post('/run', express.json({ limit: '32kb' }), (req: Request, res: Response) => {
+lifecycleRouter.all('/run', express.json({ limit: '32kb' }), (req: Request, res: Response) => {
   const context = applyRunHook(req.body);
   logger.info(
     { hook: 'run', microvmId: context.microvmId, hasPayload: context.runHookPayload != null },
@@ -93,10 +93,10 @@ lifecycleRouter.post('/run', express.json({ limit: '32kb' }), (req: Request, res
   return res.status(200).json({ hook: 'run', status: 'ok' });
 });
 
-lifecycleRouter.post('/resume', ackHook('resume'));
-lifecycleRouter.post('/suspend', ackHook('suspend'));
+lifecycleRouter.all('/resume', ackHook('resume'));
+lifecycleRouter.all('/suspend', ackHook('suspend'));
 
-lifecycleRouter.post('/terminate', (_req: Request, res: Response) => {
+lifecycleRouter.all('/terminate', (_req: Request, res: Response) => {
   logger.info({ hook: 'terminate' }, 'MicroVM lifecycle hook invoked');
   /* Stop before resetting the workspace so a resident process cannot race the
    * recursive session cleanup. The platform does not need to wait for this

@@ -14,6 +14,10 @@ import logger from './logger';
 import hostedAppRouter from './hosted-app/router';
 import { hostedAppPreviewGateway } from './hosted-app/preview-gateway';
 
+import { localAuth } from './auth/local';
+
+const { LOCAL_MODE: isLocalMode } = env;
+
 const app = express();
 app.post('/v1/workspace-tools/execute', workspaceToolOutcomeLogging);
 app.disable('x-powered-by');
@@ -25,7 +29,7 @@ const v1 = Router();
 
 app.use(json({ limit: env.HTTP_JSON_LIMIT })); // Large scripts/tool definitions are configurable.
 
-app.get('/v1/health', async (_, res) => {
+const healthHandler = async (_: express.Request, res: express.Response) => {
   try {
     await connection.ping();
     res.sendStatus(200);
@@ -33,10 +37,13 @@ app.get('/v1/health', async (_, res) => {
     logger.error('Health check failed:', error);
     res.sendStatus(503);
   }
-});
+};
+
+app.get('/v1/health', healthHandler);
+app.get('/health', healthHandler);
 
 v1.use('/bridge', bridgeRouter);
-v1.use(apiKeyAuth);
+v1.use(isLocalMode ? localAuth : apiKeyAuth);
 
 v1.use(workspaceToolsRouter);
 v1.use('/hosted-apps', hostedAppRouter);
@@ -44,6 +51,7 @@ v1.use(serviceRouter);
 v1.use(programmaticRouter);
 
 app.use('/v1', v1);
+app.use(v1);
 app.use(requestNotFoundLogger);
 app.use(requestErrorLogger);
 
@@ -56,10 +64,16 @@ process.on('SIGUSR2', gracefulShutdown); // For nodemon restarts
 
 // Improve your existing handlers
 process.on('uncaughtException', async (error) => {
+  try {
+    require('fs').writeSync(2, `FATAL Uncaught Exception: ${error instanceof Error ? error.stack || error.message : String(error)}\n`);
+  } catch {}
   logger.error('Uncaught Exception', error);
   await gracefulShutdown();
 });
 
 process.on('unhandledRejection', (reason) => {
+  try {
+    require('fs').writeSync(2, `FATAL Unhandled Rejection: ${reason instanceof Error ? reason.stack || reason.message : String(reason)}\n`);
+  } catch {}
   logger.error('Unhandled Rejection', reason);
 });
