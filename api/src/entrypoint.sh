@@ -202,4 +202,5 @@ rm -f "$SMOKE_STDERR"
 rm -rf "$SMOKE_DIR"
 
 echo "Starting sandbox API server..."
-exec bun run /sandbox_api/.build/index.js
+# Absolute path: the Lambda MicroVM guest does not carry the image PATH.
+exec /usr/local/bin/bun run /sandbox_api/.build/index.js
