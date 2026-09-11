@@ -76,40 +76,25 @@ if [ "$SANDBOX_REMOVE_UMOUNT_AFTER_STARTUP" = "true" ]; then
 fi
 
 # Set up cgroup v2 delegation for NsJail when the container runtime allows it.
+CGROUPV2_OK=false
 if [ "$SANDBOX_USE_CGROUPV2" = "true" ] && [ -f /sys/fs/cgroup/cgroup.controllers ]; then
     echo "cgroup v2 detected, controllers available: $(cat /sys/fs/cgroup/cgroup.controllers)"
 
-    if mkdir -p /sys/fs/cgroup/sandbox_api 2>/dev/null; then
-        echo "Created /sys/fs/cgroup/sandbox_api"
+    if mkdir -p /sys/fs/cgroup/sandbox_api 2>/dev/null && \
+       [ -d /sys/fs/cgroup/sandbox_api ] && echo $$ > /sys/fs/cgroup/sandbox_api/cgroup.procs 2>&1 && \
+       echo "+memory +pids" > /sys/fs/cgroup/cgroup.subtree_control 2>&1; then
+        echo "cgroup v2 delegation configured"
+        CGROUPV2_OK=true
     else
-        echo "WARNING: Failed to create /sys/fs/cgroup/sandbox_api"
+        echo "WARNING: Failed to enable controllers on /sys/fs/cgroup/cgroup.subtree_control - disabling cgroups"
     fi
+fi
 
-    if [ -d /sys/fs/cgroup/sandbox_api ] && echo $$ > /sys/fs/cgroup/sandbox_api/cgroup.procs 2>&1; then
-        echo "Moved PID $$ to /sys/fs/cgroup/sandbox_api"
-    else
-        echo "WARNING: Failed to move PID $$ to /sys/fs/cgroup/sandbox_api"
-    fi
-
-    if echo "+memory +pids" > /sys/fs/cgroup/cgroup.subtree_control 2>&1; then
-        echo "Enabled +memory +pids on /sys/fs/cgroup/cgroup.subtree_control"
-    else
-        echo "WARNING: Failed to enable controllers on /sys/fs/cgroup/cgroup.subtree_control"
-        echo "  Current subtree_control: $(cat /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || echo 'unreadable')"
-        echo "  Procs in root cgroup: $(wc -l < /sys/fs/cgroup/cgroup.procs 2>/dev/null || echo 'unknown')"
-    fi
-
-    if [ -f /sys/fs/cgroup/sandbox_api/cgroup.controllers ]; then
-        echo "sandbox_api controllers: $(cat /sys/fs/cgroup/sandbox_api/cgroup.controllers)"
-    else
-        echo "WARNING: sandbox_api/cgroup.controllers not found"
-    fi
-
-    echo "cgroup v2 delegation configured"
-else
-    echo "cgroup v2 disabled for NsJail"
+if [ "$CGROUPV2_OK" = "false" ]; then
+    echo "cgroups disabled for NsJail (using rlimit-based sandboxing)"
+    export SANDBOX_USE_CGROUPV2="false"
     NSJAIL_CONFIG="/tmp/sandbox-no-cgroup.cfg"
-    sed '/^cgroup_/d' "$NSJAIL_CONFIG_SOURCE" > "$NSJAIL_CONFIG"
+    sed -E '/^(cgroup_|clone_newcgroup)/d' "$NSJAIL_CONFIG_SOURCE" > "$NSJAIL_CONFIG"
     export NSJAIL_CONFIG
 fi
 
@@ -162,14 +147,13 @@ else
     SMOKE_OUTSIDE_UID=65534
     SMOKE_OUTSIDE_GID=65534
 fi
-	if chown "$SMOKE_OUTSIDE_UID:$SMOKE_OUTSIDE_GID" "$SMOKE_DIR"; then
-	    chmod 711 "$SMOKE_DIR"
-	elif [ "$SMOKE_PER_JOB_UIDS" = "true" ]; then
-	    echo "NsJail smoke test setup failed: SANDBOX_PER_JOB_UIDS=true requires chown support" >&2
-	    exit 1
-	else
-	    chmod 777 "$SMOKE_DIR"
-	fi
+
+if chown "$SMOKE_OUTSIDE_UID:$SMOKE_OUTSIDE_GID" "$SMOKE_DIR" 2>/dev/null; then
+    chmod 711 "$SMOKE_DIR"
+else
+    chmod 777 "$SMOKE_DIR"
+fi
+
 SMOKE_LOG=$(mktemp)
 SMOKE_STDERR=$(mktemp)
 
@@ -191,14 +175,12 @@ else
     cat "$SMOKE_LOG" 2>/dev/null || true
     echo "NsJail stderr:"
     cat "$SMOKE_STDERR" 2>/dev/null || true
-    rm -f "$SMOKE_LOG"
-    rm -f "$SMOKE_STDERR"
+    rm -f "$SMOKE_LOG" "$SMOKE_STDERR"
     rm -rf "$SMOKE_DIR"
     exit 1
 fi
-rm -f "$SMOKE_LOG"
-rm -f "$SMOKE_STDERR"
+rm -f "$SMOKE_LOG" "$SMOKE_STDERR"
 rm -rf "$SMOKE_DIR"
 
 echo "Starting sandbox API server..."
-exec bun run /sandbox_api/.build/index.js
+exec /usr/local/bin/bun run /sandbox_api/.build/index.js
