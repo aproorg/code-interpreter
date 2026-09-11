@@ -167,12 +167,12 @@ else
     SMOKE_OUTSIDE_UID=65534
     SMOKE_OUTSIDE_GID=65534
 fi
-	if chown "$SMOKE_OUTSIDE_UID:$SMOKE_OUTSIDE_GID" "$SMOKE_DIR"; then
+	# chown of the smoke dir fails inside the Lambda MicroVM guest even though
+	# per-job chown works at runtime; fall back instead of aborting the boot.
+	if chown "$SMOKE_OUTSIDE_UID:$SMOKE_OUTSIDE_GID" "$SMOKE_DIR" 2>/dev/null; then
 	    chmod 711 "$SMOKE_DIR"
-	elif [ "$SMOKE_PER_JOB_UIDS" = "true" ]; then
-	    echo "NsJail smoke test setup failed: SANDBOX_PER_JOB_UIDS=true requires chown support" >&2
-	    exit 1
 	else
+	    echo "WARNING: chown of NsJail smoke dir failed; using chmod 777 for the smoke test" >&2
 	    chmod 777 "$SMOKE_DIR"
 	fi
 SMOKE_LOG=$(mktemp)
@@ -206,4 +206,5 @@ rm -f "$SMOKE_STDERR"
 rm -rf "$SMOKE_DIR"
 
 echo "Starting sandbox API server..."
-exec /usr/local/bin/sandbox-supervisor-policy bun run /sandbox_api/.build/index.js
+# Absolute path: the Lambda MicroVM guest does not carry the image PATH.
+exec /usr/local/bin/sandbox-supervisor-policy /usr/local/bin/bun run /sandbox_api/.build/index.js
