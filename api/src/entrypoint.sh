@@ -109,7 +109,8 @@ if [ "$SANDBOX_USE_CGROUPV2" = "true" ] && [ -f /sys/fs/cgroup/cgroup.controller
 else
     echo "cgroup v2 disabled for NsJail"
     NSJAIL_CONFIG="/tmp/sandbox-no-cgroup.cfg"
-    sed '/^cgroup_/d' "$NSJAIL_CONFIG_SOURCE" > "$NSJAIL_CONFIG"
+    # clone_newcgroup makes nsjail create cgroup v1 dirs and exit 255 when cgroups are unavailable
+    sed -E '/^(cgroup_|clone_newcgroup)/d' "$NSJAIL_CONFIG_SOURCE" > "$NSJAIL_CONFIG"
     export NSJAIL_CONFIG
 fi
 
