@@ -86,6 +86,31 @@ async function createMinioClient(): Promise<Client> {
     });
   }
 
+  if (!process.env.MINIO_ACCESS_KEY) {
+    /** No static pair and no IRSA: resolve through the AWS SDK default chain
+     * (ECS task role, EC2 instance profile, env, profile). minio's own
+     * IamAwsProvider cannot read Fargate container credentials. */
+    logger.info('Using the AWS SDK default credential chain for MinIO/S3 authentication', {
+      region: baseConfig.region,
+    });
+    const { S3Client } = await import('@aws-sdk/client-s3');
+    const sdk = new S3Client({ region: baseConfig.region });
+    const credentialsProvider = {
+      async getCredentials() {
+        const c = await sdk.config.credentials();
+        return {
+          getAccessKey: () => c.accessKeyId,
+          getSecretKey: () => c.secretAccessKey,
+          getSessionToken: () => c.sessionToken,
+        };
+      },
+    };
+    return new Client({
+      ...baseConfig,
+      credentialsProvider: credentialsProvider as unknown as ClientOptions['credentialsProvider'],
+    });
+  }
+
   logger.info('Using explicit credentials for MinIO/S3 authentication');
   return new Client({
     ...baseConfig,
