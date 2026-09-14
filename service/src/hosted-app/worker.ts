@@ -8,6 +8,7 @@ import type { HostedAppJob, HostedAppJobData, HostedAppJobName, HostedAppJobResu
 import { HOSTED_APP_QUEUE_NAME } from './queue';
 import logger from '../logger';
 import { workerRunning } from '../metrics';
+import { bullmqPrefix } from '../redis-connection';
 
 export function serializedHostedAppFailure(error: unknown): Error {
   if (error instanceof HostedAppControlPlaneError) {
@@ -101,7 +102,7 @@ export const hostedAppWorker: Worker<
   HostedAppJobName
 > | undefined = env.HOSTED_APPS_ENABLED
   ? new Worker(HOSTED_APP_QUEUE_NAME, processHostedAppJob, {
-    connection,
+    prefix: bullmqPrefix(), connection,
     /* Lifecycle transitions are serialized again by their per-app Redis lock.
      * This modest concurrency allows unrelated apps to launch in parallel while
      * the fleet-wide AWS throttle remains authoritative. */
