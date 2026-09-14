@@ -129,7 +129,7 @@ beforeAll(() => {
           await new Promise((resolve) => setTimeout(resolve, executeDelayMs));
         }
         if (stealSessionLockOnExecute) {
-          await mock.set('rtsx:lock:rt_session_1', 'stolen');
+          await mock.set('rtsx:lock:{rt_session_1}', 'stolen');
         }
         return new Response(JSON.stringify(executeResponseBody), {
           status: executeStatus,
@@ -728,7 +728,7 @@ describe('LambdaMicrovmSandboxBackend session execution', () => {
     });
     /* Model a worker that persisted its intent and whose RunMicrovm reached AWS,
      * but died before it could record the returned MicroVM id. */
-    await mock.set('rtsx:gen:rt_session_1', '7');
+    await mock.set('rtsx:gen:{rt_session_1}', '7');
     const lock = await acquireRuntimeSessionLock('rt_session_1', 60_000);
     expect(lock).not.toBeNull();
     await writeRuntimeSessionRecord({
@@ -861,7 +861,7 @@ describe('LambdaMicrovmSandboxBackend session execution', () => {
      * volatile registry (including its generation counter) is lost, while the
      * provider retains its client-token idempotency history. */
     await fake.terminateMicrovm(firstVmId);
-    await mock.del('rtsx:sess:rt_session_1', 'rtsx:gen:rt_session_1');
+    await mock.del('rtsx:sess:{rt_session_1}', 'rtsx:gen:{rt_session_1}');
 
     await expect(
       makeBackend(fake, { imageVersion: '4' }).execute(request(), sessionContext()),
@@ -1439,7 +1439,7 @@ describe('LambdaMicrovmSandboxBackend session execution', () => {
     const fake = fakeClient();
     const backend = makeBackend(fake);
     onExecute = async () => {
-      await mock.del('rtsx:sess:rt_session_1');
+      await mock.del('rtsx:sess:{rt_session_1}');
     };
 
     try {
@@ -1680,7 +1680,7 @@ describe('LambdaMicrovmSandboxBackend auto-checkpoint', () => {
     const originalGet = redisWithGet.get.bind(mock);
     let failSessionRead = false;
     redisWithGet.get = async (key: string): Promise<string | null> => {
-      if (failSessionRead && key === 'rtsx:sess:rt_ckpt_1') {
+      if (failSessionRead && key === 'rtsx:sess:{rt_ckpt_1}') {
         throw new Error('registry read unavailable');
       }
       return originalGet(key);

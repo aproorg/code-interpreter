@@ -6,6 +6,7 @@ import { hostedAppOperationTimeoutMs } from '../config';
 import logger from '../logger';
 import { withHostedAppQueueDeadline } from './queue-deadline';
 import type { HostedAppJobData, HostedAppJobName, HostedAppJobResult } from './jobs';
+import { bullmqPrefix } from '../redis-connection';
 
 /** Hosted apps are stateful-only. A fixed isolated queue prevents an ordinary
  * stateless worker from ever receiving an AWS lifecycle job. */
@@ -24,9 +25,9 @@ function resources(): { queue: HostedAppQueue; events: QueueEvents } {
   if (!hostedAppQueue || !hostedAppQueueEvents) {
     hostedAppQueue = new Queue<HostedAppJobData, HostedAppJobResult, HostedAppJobName>(
       HOSTED_APP_QUEUE_NAME,
-      { connection },
+      { prefix: bullmqPrefix(), connection },
     );
-    hostedAppQueueEvents = new QueueEvents(HOSTED_APP_QUEUE_NAME, { connection });
+    hostedAppQueueEvents = new QueueEvents(HOSTED_APP_QUEUE_NAME, { prefix: bullmqPrefix(), connection });
     setMaxListeners(0, hostedAppQueue, hostedAppQueueEvents);
     /* These resources are created after lifecycle startup, on first use, so the
      * ordinary queue listener registration never sees them. An unhandled

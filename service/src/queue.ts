@@ -19,6 +19,7 @@ import type {
 import logger from './logger';
 import { redisKeepAliveOptions } from './redis-options';
 import { bullmqQueueJobs, registerBullmqQueueMetricsCollector } from './metrics';
+import { bullmqPrefix } from './redis-connection';
 
 const MAX_RECONNECT_ATTEMPTS = 5;
 const RECONNECT_DELAY = 2000;
@@ -87,8 +88,8 @@ function getQueueResources(
   const existing = queueResources.get(name);
   if (existing != null) return existing;
 
-  const queue = new Queue<t.JobData, t.JobResult, Jobs.execute>(name, { connection });
-  const events = new QueueEvents(name, { connection });
+  const queue = new Queue<t.JobData, t.JobResult, Jobs.execute>(name, { prefix: bullmqPrefix(), connection });
+  const events = new QueueEvents(name, { prefix: bullmqPrefix(), connection });
   setMaxListeners(0, queue, events);
   const resources = { queue, events };
   queueResources.set(name, resources);

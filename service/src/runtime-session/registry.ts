@@ -7,6 +7,7 @@ import {
 } from '../config';
 import logger from '../logger';
 import type { HostedAppRecordDetails } from '../hosted-app/record';
+import { hashTag } from '../redis-connection';
 
 export { RUNTIME_SESSION_REDIS_COMMAND_TIMEOUT_MS } from '../config';
 
@@ -294,7 +295,7 @@ export async function acquireRuntimeSessionLock(
   try {
     result = await runRegistryCommand(
       'Runtime session lock acquire',
-      () => redis.set(`${LOCK_PREFIX}${runtimeSessionId}`, token, 'PX', ttlMs, 'NX'),
+      () => redis.set(`${LOCK_PREFIX}${hashTag(runtimeSessionId)}`, token, 'PX', ttlMs, 'NX'),
       options,
       /* A caller-side deadline cannot cancel ioredis. The original SET may
        * have succeeded even if an automatic replay eventually resolves null,
@@ -404,7 +405,7 @@ export async function releaseRuntimeSessionLock(
     try {
       await runRegistryCommand(
         'Runtime session lock release',
-        () => redis.releaseRuntimeSessionLockScript(`${LOCK_PREFIX}${runtimeSessionId}`, token),
+        () => redis.releaseRuntimeSessionLockScript(`${LOCK_PREFIX}${hashTag(runtimeSessionId)}`, token),
         { signal: options.signal, timeoutMs: remainingMs },
       );
       return;
@@ -453,7 +454,7 @@ export async function renewRuntimeSessionLock(
     const result = await runRegistryCommand(
       'Runtime session lock renewal',
       () => redis.renewRuntimeSessionLockScript(
-        `${LOCK_PREFIX}${runtimeSessionId}`,
+        `${LOCK_PREFIX}${hashTag(runtimeSessionId)}`,
         token,
         String(ttlMs),
       ),
@@ -475,7 +476,7 @@ export async function readRuntimeSessionRecord(
 ): Promise<RuntimeSessionRecord | null> {
   const data = await runRegistryCommand(
     'Runtime session record read',
-    () => redis.get(`${SESS_PREFIX}${runtimeSessionId}`),
+    () => redis.get(`${SESS_PREFIX}${hashTag(runtimeSessionId)}`),
     options,
   );
   if (data == null) return null;
@@ -502,8 +503,8 @@ export async function writeRuntimeSessionRecord(
     const result = await runRegistryCommand(
       'Runtime session record write',
       () => redis.writeRuntimeSessionRecordScript(
-        `${SESS_PREFIX}${record.runtime_session_id}`,
-        `${LOCK_PREFIX}${record.runtime_session_id}`,
+        `${SESS_PREFIX}${hashTag(record.runtime_session_id)}`,
+        `${LOCK_PREFIX}${hashTag(record.runtime_session_id)}`,
         lockToken,
         JSON.stringify(record),
         String(ttlSeconds),
@@ -533,7 +534,7 @@ export async function allocateRuntimeSessionGeneration(
   if (!Number.isSafeInteger(initialGeneration) || initialGeneration < 1) {
     throw new Error('Runtime session generation must be a positive safe integer');
   }
-  const key = `${GEN_PREFIX}${runtimeSessionId}`;
+  const key = `${GEN_PREFIX}${hashTag(runtimeSessionId)}`;
   const rawGeneration = await runRegistryCommand(
     'Runtime session generation allocation',
     () => redis.allocateRuntimeSessionGenerationScript(
@@ -561,7 +562,7 @@ export async function allocateCheckpointSequence(
   retainedMax = 0,
   options: RuntimeSessionRedisCommandOptions = {},
 ): Promise<number> {
-  const key = `${CKPT_SEQ_PREFIX}${runtimeSessionId}`;
+  const key = `${CKPT_SEQ_PREFIX}${hashTag(runtimeSessionId)}`;
   return runRegistryCommand(
     'Runtime session checkpoint sequence allocation',
     () => redis.allocateCheckpointSequenceScript(
@@ -583,8 +584,8 @@ export async function removeRuntimeSession(
   const result = await runRegistryCommand(
     'Runtime session record removal',
     () => redis.removeRuntimeSessionScript(
-      `${SESS_PREFIX}${runtimeSessionId}`,
-      `${LOCK_PREFIX}${runtimeSessionId}`,
+      `${SESS_PREFIX}${hashTag(runtimeSessionId)}`,
+      `${LOCK_PREFIX}${hashTag(runtimeSessionId)}`,
       lockToken,
     ),
     options,
