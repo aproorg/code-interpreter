@@ -181,10 +181,10 @@ describe('runtime session lock', () => {
     releaseDelayedSet();
     await lateSetComplete;
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (await mock.get('rtsx:lock:rt_late_lock') == null) break;
+      if (await mock.get('rtsx:lock:{rt_late_lock}') == null) break;
       await new Promise(resolve => setTimeout(resolve, 10));
     }
-    expect(await mock.get('rtsx:lock:rt_late_lock')).toBeNull();
+    expect(await mock.get('rtsx:lock:{rt_late_lock}')).toBeNull();
   });
 
   test('an applied SET whose replay resolves null cannot leave a ghost lock', async () => {
@@ -228,10 +228,10 @@ describe('runtime session lock', () => {
     await expect(acquire).rejects.toThrow('job deadline');
     finishReplay();
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (await mock.get('rtsx:lock:rt_ambiguous_lock') == null) break;
+      if (await mock.get('rtsx:lock:{rt_ambiguous_lock}') == null) break;
       await new Promise(resolve => setTimeout(resolve, 10));
     }
-    expect(await mock.get('rtsx:lock:rt_ambiguous_lock')).toBeNull();
+    expect(await mock.get('rtsx:lock:{rt_ambiguous_lock}')).toBeNull();
   });
 
   test('an applied SET whose replay quickly resolves null is still released', async () => {
@@ -254,10 +254,10 @@ describe('runtime session lock', () => {
 
     expect(await acquireRuntimeSessionLock('rt_fast_null_lock', 60_000)).toBeNull();
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (await mock.get('rtsx:lock:rt_fast_null_lock') == null) break;
+      if (await mock.get('rtsx:lock:{rt_fast_null_lock}') == null) break;
       await new Promise(resolve => setTimeout(resolve, 10));
     }
-    expect(await mock.get('rtsx:lock:rt_fast_null_lock')).toBeNull();
+    expect(await mock.get('rtsx:lock:{rt_fast_null_lock}')).toBeNull();
   });
 
   test('an applied SET whose response quickly rejects is still released', async () => {
@@ -282,10 +282,10 @@ describe('runtime session lock', () => {
       acquireRuntimeSessionLock('rt_fast_reject_lock', 60_000),
     ).rejects.toThrow('connection closed after apply');
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      if (await mock.get('rtsx:lock:rt_fast_reject_lock') == null) break;
+      if (await mock.get('rtsx:lock:{rt_fast_reject_lock}') == null) break;
       await new Promise(resolve => setTimeout(resolve, 10));
     }
-    expect(await mock.get('rtsx:lock:rt_fast_reject_lock')).toBeNull();
+    expect(await mock.get('rtsx:lock:{rt_fast_reject_lock}')).toBeNull();
   });
 
   test('lock polling catches abort between its precheck and listener registration', async () => {
@@ -400,7 +400,7 @@ describe('fenced record writes', () => {
   });
 
   test('reads a corrupt record as missing instead of throwing', async () => {
-    await mock.set('rtsx:sess:rt_bad', '{not valid json');
+    await mock.set('rtsx:sess:{rt_bad}', '{not valid json');
     expect(await readRuntimeSessionRecord('rt_bad')).toBeNull();
   });
 

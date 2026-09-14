@@ -20,6 +20,7 @@ import type {
 import logger from './logger';
 import { redisKeepAliveOptions, redisReconnectDelay } from './redis-options';
 import { bullmqQueueJobs, registerBullmqQueueMetricsCollector } from './metrics';
+import { bullmqPrefix } from './redis-connection';
 import { JobCancellationRegistry } from './job-cancellation';
 
 const retryStrategy: CommonRedisOptions['retryStrategy'] = (times) => {
@@ -83,8 +84,8 @@ function getQueueResources(
   const existing = queueResources.get(name);
   if (existing != null) return existing;
 
-  const queue = new Queue<t.JobData, t.JobResult, Jobs.execute>(name, { connection });
-  const events = new QueueEvents(name, { connection });
+  const queue = new Queue<t.JobData, t.JobResult, Jobs.execute>(name, { prefix: bullmqPrefix(), connection });
+  const events = new QueueEvents(name, { prefix: bullmqPrefix(), connection });
   setMaxListeners(0, queue, events);
   const resources = { queue, events };
   queueResources.set(name, resources);
