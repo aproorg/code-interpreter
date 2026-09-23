@@ -35,6 +35,28 @@ RUN gcc -O2 -static -o /usr/local/bin/spec-guard /tmp/spec-guard.c \
     && chmod 0111 /usr/local/bin/spec-guard /usr/local/bin/sandbox-rootfs-setup
 
 # ============================================================================
+# Stage 1a: Fetch the pandoc binary (apro-pdf skill needs it on PATH; apt's
+# pandoc is stuck on an ancient 2.x, and apt/dpkg are deleted from the final
+# image anyway, so grab the upstream static release instead).
+# ============================================================================
+FROM buildpack-deps:bookworm-curl AS pandoc-fetch
+
+ARG PANDOC_VERSION=3.11
+ARG TARGETARCH
+
+RUN case "$TARGETARCH" in \
+        amd64) SHA256=37edb3bbcf722f921a009941bf5874e2e0c09263226c9b4a2d980788cb062ab6 ;; \
+        arm64) SHA256=56ed5566ec41d22ec9ee0704e6ac0b98ba102e92384efd5306173a22d314c79a ;; \
+        *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/pandoc.tar.gz \
+        "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-${TARGETARCH}.tar.gz" \
+    && echo "${SHA256}  /tmp/pandoc.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/pandoc.tar.gz -C /tmp \
+    && mv "/tmp/pandoc-${PANDOC_VERSION}/bin/pandoc" /pandoc \
+    && rm -rf /tmp/pandoc.tar.gz "/tmp/pandoc-${PANDOC_VERSION}"
+
+# ============================================================================
 # Stage 1b: Build language runtime packages (only consumed by sandbox-runner-baked)
 #
 # Mirrors docker/Dockerfile.package-init but runs at image-build time so the
@@ -90,6 +112,11 @@ RUN apt-get update && \
     libprotobuf32 \
     libffi8 \
     ca-certificates \
+    # WeasyPrint (apro-pdf skill) needs Pango + a HarfBuzz subsetter at
+    # runtime; libfontconfig1/fontconfig come in transitively via these.
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libharfbuzz-subset0 \
     && rm -rf /var/lib/apt/lists/* \
     && libffi=$(find /usr/lib -name 'libffi.so.8' -print -quit) \
     && { [ -n "$libffi" ] || { echo "libffi.so.8 not found" >&2; exit 1; }; } \
@@ -111,6 +138,10 @@ RUN sed -i '/en_US.UTF-8/s/^# //g' /etc/locale.gen && locale-gen
 COPY --from=nsjail-builder /nsjail/nsjail /usr/sbin/nsjail
 COPY --from=nsjail-builder /usr/local/bin/spec-guard /usr/local/bin/spec-guard
 RUN chmod +x /usr/sbin/nsjail
+
+# pandoc for the apro-pdf skill (document conversion); fetched in the
+# pandoc-fetch stage above since apt/bookworm only ships an ancient 2.x.
+COPY --from=pandoc-fetch /pandoc /usr/local/bin/pandoc
 
 # The tool-call socket proxy must run under Node, not Bun. Bun's node:http
 # compat layer never fires `'connection'` events and Bun.serve's idleTimeout
