@@ -53,6 +53,28 @@ COPY --from=node:22.23.4-slim /usr/local/bin/node /usr/local/bin/node
 COPY --from=oven/bun:1.4.4-debian /usr/local/bin/bun /usr/local/bin/bun
 
 # ============================================================================
+# Stage 1a: Fetch the pandoc binary (apro-pdf skill needs it on PATH; apt's
+# pandoc is stuck on an ancient 2.x, and apt/dpkg are deleted from the final
+# image anyway, so grab the upstream static release instead).
+# ============================================================================
+FROM buildpack-deps:bookworm-curl AS pandoc-fetch
+
+ARG PANDOC_VERSION=3.11
+ARG TARGETARCH
+
+RUN case "$TARGETARCH" in \
+        amd64) SHA256=37edb3bbcf722f921a009941bf5874e2e0c09263226c9b4a2d980788cb062ab6 ;; \
+        arm64) SHA256=56ed5566ec41d22ec9ee0704e6ac0b98ba102e92384efd5306173a22d314c79a ;; \
+        *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/pandoc.tar.gz \
+        "https://github.com/jgm/pandoc/releases/download/${PANDOC_VERSION}/pandoc-${PANDOC_VERSION}-linux-${TARGETARCH}.tar.gz" \
+    && echo "${SHA256}  /tmp/pandoc.tar.gz" | sha256sum -c - \
+    && tar -xzf /tmp/pandoc.tar.gz -C /tmp \
+    && mv "/tmp/pandoc-${PANDOC_VERSION}/bin/pandoc" /pandoc \
+    && rm -rf /tmp/pandoc.tar.gz "/tmp/pandoc-${PANDOC_VERSION}"
+
+# ============================================================================
 # Stage 1b: Build language runtime packages (only consumed by sandbox-runner-baked)
 #
 # Mirrors docker/Dockerfile.package-init but runs at image-build time so the
@@ -109,10 +131,32 @@ RUN apt-get update && \
     libprotobuf32 \
     libffi8 \
     ca-certificates \
+    # WeasyPrint (apro-pdf skill) needs Pango + a HarfBuzz subsetter at
+    # runtime; libfontconfig1/fontconfig come in transitively via these.
+    libpango-1.0-0 \
+    libpangoft2-1.0-0 \
+    libharfbuzz-subset0 \
+    # LibreOffice headless (soffice) renders office docs to PDF; tesseract is the OCR binary pytesseract needs.
+    libreoffice-impress-nogui \
+    libreoffice-writer-nogui \
+    libreoffice-calc-nogui \
+    fonts-crosextra-carlito \
+    fonts-crosextra-caladea \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-isl \
     && rm -rf /var/lib/apt/lists/* \
     && libffi=$(find /usr/lib -name 'libffi.so.8' -print -quit) \
     && { [ -n "$libffi" ] || { echo "libffi.so.8 not found" >&2; exit 1; }; } \
     && ln -sf "$libffi" "${libffi%.so.8}.so.6"
+
+# The jail mounts /usr but not /etc, so soffice's symlinks into /etc abort
+# with a UNO RuntimeException; ship real files instead, and default the
+# profile to the session workspace (the jail's default profile path exits 77).
+RUN cp --remove-destination /etc/libreoffice/registry/main.xcd /usr/lib/libreoffice/share/registry/main.xcd \
+    && cp --remove-destination /etc/libreoffice/psprint.conf /usr/lib/libreoffice/share/psprint/psprint.conf \
+    && sed -i 's#^UserInstallation=.*#UserInstallation=file:///mnt/data/.libreoffice#' /usr/lib/libreoffice/program/bootstraprc \
+    && grep -qx 'UserInstallation=file:///mnt/data/.libreoffice' /usr/lib/libreoffice/program/bootstraprc
 
 # Restore the standard Debian `awk` -> `mawk` symlink. mawk is Priority:
 # required so its binary is in /usr/bin already, but slim base images skip
@@ -134,6 +178,10 @@ COPY --from=nsjail-builder /usr/local/bin/sandbox-supervisor-policy /usr/local/b
 COPY --from=nsjail-builder /usr/local/lib/anonymous-pipes.node /usr/local/lib/anonymous-pipes.node
 ENV SANDBOX_PIPE_ADDON=/usr/local/lib/anonymous-pipes.node
 RUN chmod +x /usr/sbin/nsjail
+
+# pandoc for the apro-pdf skill (document conversion); fetched in the
+# pandoc-fetch stage above since apt/bookworm only ships an ancient 2.x.
+COPY --from=pandoc-fetch /pandoc /usr/local/bin/pandoc
 
 # The per-invocation broker starts Node after restore, so its OpenSSL process
 # state is not captured in the MicroVM snapshot. Pulling the Node binary

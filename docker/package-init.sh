@@ -278,6 +278,8 @@ if [ -f "$PIP_PATH" ]; then
         pdf2image \
         "pdfminer.six" \
         reportlab \
+        weasyprint==70.0 \
+        mermaidx==0.9.5 \
         opencv-python-headless \
         svglib \
         cairosvg \
