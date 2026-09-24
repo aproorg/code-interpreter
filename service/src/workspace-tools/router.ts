@@ -18,6 +18,7 @@ import {
   BridgeWorkerSelectionError,
   resolveBridgeWorkerSelection,
 } from '../bridge/selection';
+import { principalWorkspaceInstanceId } from '../bridge/workspace-instance';
 
 interface WorkspaceToolsRouterOptions {
   store: Pick<RedisBridgeStore, 'dispatchWorkspaceTool'>;
@@ -36,6 +37,7 @@ function asyncRoute(handler: (req: AuthenticatedRequest, res: Response) => Promi
 }
 
 export function bridgeStoreStatus(error: BridgeStoreError): number {
+  if (error.code === 'WORKSPACE_QUEUE_TIMEOUT') return 503;
   if (error.code === 'WORKER_QUEUE_FULL') return 429;
   if (error.code === 'WORKER_UNAUTHORIZED') return 403;
   if (error.code === 'ASSIGNMENT_INVALID') return 400;
@@ -81,12 +83,22 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
         return;
       }
       outcome.operation = req.body.operation;
-      const request: WorkspaceToolRequest = req.body.operation === 'execute_command'
-        ? { ...req.body, timeoutMs: Math.min(
-          req.body.timeoutMs ?? BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS,
+      const principalRequest: WorkspaceToolRequest = req.body.workspaceInstanceId == null
+        ? req.body
+        : {
+            ...req.body,
+            workspaceInstanceId: principalWorkspaceInstanceId({
+              instanceId: req.body.workspaceInstanceId,
+              tenantId: principal.tenantId,
+              principalId: principal.userId,
+            }),
+          };
+      const request: WorkspaceToolRequest = principalRequest.operation === 'execute_command'
+        ? { ...principalRequest, timeoutMs: Math.min(
+          principalRequest.timeoutMs ?? BRIDGE_WORKSPACE_COMMAND_DEFAULT_TIMEOUT_MS,
           options.timeoutMs ?? Number.MAX_SAFE_INTEGER,
         ) }
-        : req.body;
+        : principalRequest;
       const executionBudgetMs = request.operation === 'execute_command'
         ? request.timeoutMs! + 5_000
         : Math.min(options.timeoutMs ?? 30_000, 30_000);
@@ -172,6 +184,7 @@ export function createWorkspaceToolsRouter(options: WorkspaceToolsRouterOptions)
       } catch (error) {
         if (error instanceof BridgeStoreError) {
           outcome.errorCode = error.code;
+          if (error.code === 'WORKSPACE_QUEUE_TIMEOUT') res.setHeader('Retry-After', '1');
           res.status(bridgeStoreStatus(error)).json({
             error: error.message,
             code: error.code,

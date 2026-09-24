@@ -11,11 +11,13 @@ import type {
 } from '../../../packages/code/src/protocol';
 
 import {
+  BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS,
   BRIDGE_PROTOCOL_VERSION,
   isValidBridgeWorkerCapabilities,
   isValidBridgeWorkerId,
-  isWorkspaceToolRequest,
-  isWorkspaceToolResult,
+    isWorkspaceToolRequest,
+    isWorkspaceToolResult,
+    workspaceIsolationKey,
 } from '../../../packages/code/src/protocol';
 import type { BridgeWorkerBinding } from './pairing';
 import { BridgeAdmissionQueue } from './admission';
@@ -23,7 +25,6 @@ import { BridgeWorkspaceSlots } from './slots';
 
 const PREFIX = 'codeapi:bridge:v1';
 const POLL_INTERVAL_MS = 100;
-const CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS = 5_000;
 const DEFAULT_WORKER_TTL_SECONDS = 60;
 const DEFAULT_REDIS_COMMAND_TIMEOUT_MS = 1_000;
 
@@ -47,6 +48,7 @@ export class BridgeStoreError extends Error {
       | 'WORKER_UNAUTHORIZED'
       | 'WORKER_BUSY'
       | 'WORKER_QUEUE_FULL'
+      | 'WORKSPACE_QUEUE_TIMEOUT'
       | 'ASSIGNMENT_EXPIRED'
       | 'ASSIGNMENT_FENCED'
       | 'ASSIGNMENT_NOT_FOUND'
@@ -123,6 +125,12 @@ function supportsWorkspaceTool(
   if (!supportsOperation) {
     return supportsOperation;
   }
+  if (
+    request.workspaceInstanceId !== undefined &&
+    workspace.workspaceInstances?.includes('git_worktree') !== true
+  ) {
+    return false;
+  }
   if (request.operation === 'list_files' && request.afterPath !== undefined) {
     return capabilities?.listFileFeatures?.includes('after_path') === true;
   }
@@ -149,6 +157,48 @@ function supportsWorkspaceTool(
     );
   }
   return true;
+}
+
+function supportsWorkspaceProgrammatic(
+  registration: RegisteredBridgeWorker,
+  workspaceId: string,
+  language: string,
+  workspaceInstanceId?: string,
+): boolean {
+  const capabilities = registration.capabilities.workspaceTools;
+  const workspace = capabilities?.workspaces.find(
+    (candidate) => candidate.id === workspaceId,
+  );
+  return (
+    workspace != null &&
+    (workspaceInstanceId === undefined ||
+      workspace.workspaceInstances?.includes('git_worktree') === true) &&
+    capabilities?.operations.includes('execute_command') === true &&
+    (workspace.operations == null ||
+      workspace.operations.includes('execute_command')) &&
+    capabilities.programmaticLanguages?.includes(
+      language as 'bash',
+    ) === true
+  );
+}
+
+function workspaceInstanceId(body: t.PayloadBody): string | undefined {
+  if (
+    typeof body === 'object' &&
+    body != null &&
+    'workspace_instance_id' in body &&
+    typeof body.workspace_instance_id === 'string'
+  ) {
+    return body.workspace_instance_id;
+  }
+  return undefined;
+}
+
+export function workspaceAdmissionId(
+  workspaceId: string,
+  instanceId?: string,
+): string {
+  return workspaceIsolationKey(workspaceId, instanceId);
 }
 
 function workerKey(workerId: string): string {
@@ -700,6 +750,7 @@ export class RedisBridgeStore {
     body: t.PayloadBody;
     headers: Record<string, string>;
     workspaceRequest?: WorkspaceToolRequest;
+    workspaceId?: string;
     runtimeSessionId?: string;
     deadlineAtMs: number;
     executionTimeoutMs?: number;
@@ -709,6 +760,12 @@ export class RedisBridgeStore {
       registration: RegisteredBridgeWorker,
     ) => Promise<CodeBridgeSettlement>;
   }): Promise<CodeBridgeSettlement> {
+    if (args.workspaceRequest != null && args.workspaceId != null) {
+      throw new BridgeStoreError(
+        'ASSIGNMENT_INVALID',
+        'A bridge assignment cannot be both a workspace tool and programmatic execution',
+      );
+    }
     if (
       args.executionTimeoutMs !== undefined &&
       (args.workspaceRequest == null ||
@@ -774,6 +831,20 @@ export class RedisBridgeStore {
       );
     }
     if (
+      args.workspaceId != null &&
+      !supportsWorkspaceProgrammatic(
+        registration,
+        args.workspaceId,
+        args.body.language,
+        workspaceInstanceId(args.body),
+      )
+    ) {
+      throw new BridgeStoreError(
+        'WORKER_MISMATCH',
+        `Bridge worker ${args.workerId} does not advertise programmatic execution for the selected workspace`,
+      );
+    }
+    if (
       args.runtimeSessionId !== undefined &&
       (await this.dispatchCommand(
         () =>
@@ -798,15 +869,27 @@ export class RedisBridgeStore {
     );
     const lockIncarnationId = registration.incarnationId;
     let assignment: StoredAssignment | undefined;
+    let enqueueAttempted = false;
     let workspaceLeaseSlot: number | undefined;
+    const selectedWorkspaceId =
+      args.workspaceRequest?.workspaceId ?? args.workspaceId;
+    const selectedWorkspaceInstanceId =
+      args.workspaceRequest?.workspaceInstanceId ?? workspaceInstanceId(args.body);
+    const selectedWorkspaceAdmissionId =
+      selectedWorkspaceId == null
+        ? undefined
+        : workspaceAdmissionId(
+            selectedWorkspaceId,
+            selectedWorkspaceInstanceId,
+          );
     const workspaceSlots =
-      args.workspaceRequest != null &&
+      selectedWorkspaceId != null &&
       (registration.capabilities.workspaceLeaseSlots ?? 1) > 1
         ? new BridgeWorkspaceSlots(this.redis)
         : undefined;
     let resultCommitted = false;
     const admission =
-      args.workspaceRequest == null
+      selectedWorkspaceId == null
         ? undefined
         : new BridgeAdmissionQueue(this.redis);
     try {
@@ -820,7 +903,7 @@ export class RedisBridgeStore {
               args.deadlineAtMs,
               workspaceSlots == null
                 ? undefined
-                : args.workspaceRequest?.workspaceId,
+                : selectedWorkspaceAdmissionId,
             ),
           args,
           'Bridge admission enqueue',
@@ -855,7 +938,7 @@ export class RedisBridgeStore {
                 workerId: args.workerId,
                 incarnationId: lockIncarnationId,
                 assignmentId,
-                workspaceId: args.workspaceRequest!.workspaceId,
+                workspaceId: selectedWorkspaceAdmissionId!,
                 capacity: registration.capabilities.workspaceLeaseSlots!,
                 expiresAtMs: Date.now() + ttlSeconds * 1000,
               }),
@@ -910,7 +993,15 @@ export class RedisBridgeStore {
           );
         }
         if (
-          !supportsWorkspaceTool(current.registration, args.workspaceRequest!)
+          (args.workspaceRequest != null &&
+            !supportsWorkspaceTool(current.registration, args.workspaceRequest)) ||
+          (args.workspaceId != null &&
+            !supportsWorkspaceProgrammatic(
+              current.registration,
+              args.workspaceId,
+              args.body.language,
+              workspaceInstanceId(args.body),
+            ))
         ) {
           throw new BridgeStoreError(
             'WORKER_MISMATCH',
@@ -935,11 +1026,14 @@ export class RedisBridgeStore {
         generation,
         leaseToken,
         leaseTokenHash: tokenHash(leaseToken),
+        ...(selectedWorkspaceAdmissionId == null ? {} : {
+          workspaceFence: `native-workspace:${selectedWorkspaceAdmissionId}`,
+        }),
         ...(workspaceLeaseSlot === undefined
           ? {}
           : {
               workspaceLeaseSlot,
-              workspaceFence: `native-workspace:${args.workspaceRequest!.workspaceId}`,
+              workspaceFence: `native-workspace:${selectedWorkspaceAdmissionId!}`,
             }),
         ...(registration.identityId != null
           ? { workerIdentityId: registration.identityId }
@@ -951,6 +1045,15 @@ export class RedisBridgeStore {
               executionKind: 'workspace_tool' as const,
               request: args.workspaceRequest,
             }
+          : args.workspaceId != null
+            ? {
+                executionKind: 'workspace_programmatic' as const,
+                workspaceId: args.workspaceId,
+                request: {
+                  body: args.body,
+                  headers: args.headers,
+                },
+              }
           : {
               request: {
                 body: args.body,
@@ -963,12 +1066,14 @@ export class RedisBridgeStore {
         this.assertDispatchActive(args.signal, args.deadlineAtMs);
         assignment.incarnationId = registration.incarnationId;
         queued = await this.dispatchCommand(
-          () =>
-            this.enqueueForActiveIncarnation(
+          () => {
+            enqueueAttempted = true;
+            return this.enqueueForActiveIncarnation(
               assignment!,
               ttlSeconds,
               readyToken,
-            ),
+            );
+          },
           args,
           'Bridge assignment enqueue',
         );
@@ -1011,6 +1116,20 @@ export class RedisBridgeStore {
             `Bridge worker ${args.workerId} no longer advertises the requested workspace tool`,
           );
         }
+        if (
+          args.workspaceId != null &&
+          !supportsWorkspaceProgrammatic(
+            replacement.registration,
+            args.workspaceId,
+            args.body.language,
+            workspaceInstanceId(args.body),
+          )
+        ) {
+          throw new BridgeStoreError(
+            'WORKER_MISMATCH',
+            `Bridge worker ${args.workerId} no longer advertises programmatic execution for the selected workspace`,
+          );
+        }
         registration = replacement.registration;
         readyToken = replacement.readyToken;
       }
@@ -1034,15 +1153,40 @@ export class RedisBridgeStore {
         resultCommitted = true;
         return result;
       } catch (error) {
-        if (args.runtimeSessionId !== undefined) {
+        if (assignment.workspaceFence != null) {
+          // Native roots retain their own fence through result restoration.
+          // Do not quarantine unrelated roots or invalidate the worker lease.
+          await boundedCommand(this.redis.eval(
+            [
+              "if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end",
+              "redis.call('SET', KEYS[1], 'quarantined:' .. ARGV[1])",
+              'return 1',
+            ].join('\n'),
+            1,
+            workspaceQuarantineKey(args.workerId, assignment.workspaceFence),
+            assignment.assignmentId,
+          ), this.redisCommandTimeoutMs, 'Bridge native workspace finalization quarantine');
+        } else if (assignmentWorkspace(assignment) !== undefined) {
           await this.quarantine(
             args.workerId,
             assignment.incarnationId,
-            args.runtimeSessionId,
+            assignmentWorkspace(assignment)!,
           );
         }
         throw error;
       }
+    } catch (error) {
+      // Once enqueue starts, even a lost Redis response may hide execution.
+      if (
+        admission != null && !enqueueAttempted && !args.signal.aborted &&
+        error instanceof BridgeStoreError && error.code === 'ASSIGNMENT_EXPIRED'
+      ) {
+        throw new BridgeStoreError(
+          'WORKSPACE_QUEUE_TIMEOUT',
+          'Workspace capacity was unavailable before the queue deadline. The operation was not started. Wait for active work to finish or select an independent workspace on a machine with available capacity.',
+        );
+      }
+      throw error;
     } finally {
       if (admission != null) {
         // Expiry remains the fallback if Redis is unavailable during cancellation.
@@ -1060,19 +1204,14 @@ export class RedisBridgeStore {
           // already committed result rather than turning cleanup availability
           // into a client-visible failure that could prompt duplicate work.
         }
+      } else if (workspaceSlots != null && assignment == null) {
+        await this.cleanupUnassignedSlot(
+          args.workerId,
+          lockIncarnationId,
+          assignmentId,
+        );
       } else {
         await this.cleanupDispatch(args.workerId, assignmentId, assignment);
-      }
-      if (workspaceSlots != null && assignment == null) {
-        await boundedCommand(
-          workspaceSlots.release(
-            args.workerId,
-            lockIncarnationId,
-            assignmentId,
-          ),
-          this.redisCommandTimeoutMs,
-          'Bridge unassigned slot cleanup',
-        );
       }
     }
   }
@@ -1909,10 +2048,11 @@ export class RedisBridgeStore {
         : undefined;
     const cancelledMutation =
       signal.aborted &&
-      workspaceRequest != null &&
-      (workspaceRequest.operation === 'write_file' ||
-        workspaceRequest.operation === 'edit_file' ||
-        workspaceRequest.operation === 'execute_command');
+      (assignment.executionKind === 'workspace_programmatic' ||
+        (workspaceRequest != null &&
+          (workspaceRequest.operation === 'write_file' ||
+            workspaceRequest.operation === 'edit_file' ||
+            workspaceRequest.operation === 'execute_command')));
     if (cancelledMutation) {
       try {
         // Keep the acknowledged assignment available long enough for the
@@ -1924,7 +2064,7 @@ export class RedisBridgeStore {
         // Give Stop its own grace so a near-timeout cancellation is not
         // misclassified as an ambiguous timeout.
         const cancellationDeadlineAtMs =
-          Date.now() + CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS;
+          Date.now() + BRIDGE_CANCELLED_WORKSPACE_SETTLEMENT_GRACE_MS;
         let cancellationPollMs = POLL_INTERVAL_MS;
         while (Date.now() < cancellationDeadlineAtMs) {
           const raw = await boundedCommand(
@@ -2136,6 +2276,29 @@ export class RedisBridgeStore {
           )
         : this.cleanup(assignment),
     ]);
+  }
+
+  private async cleanupUnassignedSlot(
+    workerId: string,
+    incarnationId: string,
+    assignmentId: string,
+  ): Promise<void> {
+    // No stored assignment owns this reservation, so a cancellation outage
+    // must not leave the slot and its root busy until TTL expiry.
+    const [cleanup, release] = await Promise.allSettled([
+      this.cleanupDispatch(workerId, assignmentId, undefined),
+      boundedCommand(
+        new BridgeWorkspaceSlots(this.redis).release(
+          workerId,
+          incarnationId,
+          assignmentId,
+        ),
+        this.redisCommandTimeoutMs,
+        'Bridge unassigned slot cleanup',
+      ),
+    ]);
+    if (cleanup.status === 'rejected') throw cleanup.reason;
+    if (release.status === 'rejected') throw release.reason;
   }
 
   private async commitPendingWorkspace(

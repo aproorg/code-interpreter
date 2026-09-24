@@ -1,12 +1,20 @@
 import b from 'busboy';
+import { randomUUID } from 'node:crypto';
+import {
+  canonicalObjectId,
+  FileObjectResolver,
+  legacyObjectId,
+  mapObjectDetails,
+  storageKeyForUpload,
+} from './file-object-resolver';
+import { sendFileDownload } from './file-download';
 import path from 'path';
 import IORedis from 'ioredis';
 import express from 'express';
-import { Client } from 'minio';
 import { nanoid } from 'nanoid';
 import { PassThrough } from 'stream';
 import { pipeline } from 'stream/promises';
-import type { BucketItem, BucketItemStat, ClientOptions } from 'minio';
+import type { BucketItem, BucketItemStat, Client, ClientOptions } from 'minio';
 import type { Readable } from 'stream';
 import type * as tls from 'tls';
 import type * as t from './types';
@@ -18,7 +26,6 @@ import logger from './fileServerLogger';
 import { env } from './config';
 import { redisKeepAliveOptions } from './redis-options';
 import {
-  contentDispositionForOriginalFilename,
   decodeOriginalFilename,
   originalFilenameFromMetadata,
 } from './file-metadata';
@@ -169,6 +176,32 @@ redisClient.on('ready', () => {
   logger.info('Redis Client Ready');
 });
 
+const objectResolver = new FileObjectResolver({
+  bucket: bucketName,
+  list: prefix => minioClient.listObjects(bucketName, prefix, true),
+  stat: key => minioClient.statObject(bucketName, key),
+  onIndexError: (operation, error) => logger.warn('File-object index operation failed', { operation, error }),
+  ...(env.FILE_OBJECT_INDEX_ENABLED ? { index: {
+    get: (key: string) => redisClient.get(key),
+    set: (key: string, value: string, replace: boolean) => replace
+      ? redisClient.set(key, value, 'EX', env.SESSION_CACHE_TTL)
+      : redisClient.set(key, value, 'EX', env.SESSION_CACHE_TTL, 'NX'),
+    forget: (key: string, value: string) => redisClient.eval(
+      "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) end return 0", 1, key, value,
+    ),
+  } } : {}),
+});
+
+/** Index eviction is best effort: the index is only a hint, so a Redis failure
+ *  must never turn a completed delete or a missing-object 404 into a 500. */
+async function forgetObjectKey(session_id: string, objectId: string, objectName: string): Promise<void> {
+  try {
+    await objectResolver.forget(session_id, objectId, objectName);
+  } catch (error) {
+    logger.warn('Failed to evict file-object index entry', { error, session_id, objectId, objectName });
+  }
+}
+
 const minioRegion = process.env.MINIO_REGION ?? process.env.AWS_REGION ?? 'us-east-1';
 
 async function ensureBucketExists(retries = 10, delay = 1000): Promise<void> {
@@ -264,7 +297,14 @@ async function uploadFile(
 ): Promise<t.UploadResult> {
   const fileId = existingFileId ?? nanoid();
   const fileExtension = path.extname(filename);
-  const objectName = `${session_id}/${fileId}${fileExtension}`;
+  // Caller-supplied identities use one canonical key, so concurrent writers
+  // converge on S3's last-writer semantics regardless of filename extension.
+  const objectName = storageKeyForUpload(
+    session_id,
+    fileId,
+    fileExtension,
+    existingFileId != null,
+  );
 
   const encodedFilename = Buffer.from(filename).toString('base64');
 
@@ -275,6 +315,8 @@ async function uploadFile(
    * `getObject` / `statObject` without a separate Redis lookup. */
   const metaData: Record<string, string> = {
     'Content-Type': mimetype,
+    // New marker on every PUT, including same-ID overwrites and metadata changes.
+    'X-Amz-Meta-Codeapi-Version': randomUUID(),
     'X-Amz-Meta-Original-Filename': encodedFilename,
     'X-Amz-Meta-Original-Filename-Encoded': 'base64',
   };
@@ -292,6 +334,16 @@ async function uploadFile(
   } else {
     await minioClient.putObject(bucketName, objectName, peeked.body, undefined, metaData);
   }
+  if (existingFileId != null) {
+    // Retire every extension-keyed sibling left by older replacement behavior.
+    // Concurrent replacement writers share objectName and never delete it.
+    for (const sibling of await objectResolver.listFresh(session_id, fileId)) {
+      if (sibling === objectName) continue;
+      await minioClient.removeObject(bucketName, sibling);
+      await objectResolver.forget(session_id, fileId, sibling);
+    }
+  }
+  await objectResolver.remember(session_id, fileId, objectName);
   logger.info(`[${INSTANCE_ID}] File ID: ${fileId} | Filename: ${filename} | Session key: ${sessionKey}`);
   await redisClient.set(`upload:${sessionKey}${session_id}${fileId}`, 'true', 'EX', env.SESSION_CACHE_TTL);
   fileUploads.inc();
@@ -468,30 +520,14 @@ app.get('/sessions/:session_id/objects/:objectId/metadata', async (req, res) => 
   const { session_id, objectId } = req.params;
 
   try {
-    const stream = minioClient.listObjects(bucketName, `${session_id}/${objectId}`, true);
-    let objectName = '';
-
-    for await (const obj of stream) {
-      if (obj.name.startsWith(`${session_id}/${objectId}`) === true) {
-        objectName = obj.name;
-        break;
-      }
-    }
-
-    if (!objectName) {
-      return res.status(404).json({
-        error: 'File not found',
-        details: 'No matching file found',
-        session_id,
-        objectId,
-      });
-    }
-
-    const stat: Partial<BucketItemStat> = await minioClient.statObject(bucketName, objectName);
+    const resolved = await objectResolver.metadata(session_id, objectId);
+    if (!resolved) return res.status(404).json({ error: 'File not found' });
+    const { key: objectName, stat } = resolved;
     const originalFilename = originalFilenameFromMetadata(stat.metaData);
 
     return res.status(200).json({
       name: objectName,
+      version: stat.metaData?.['codeapi-version'],
       ...(originalFilename ? { originalFilename } : {}),
       size: stat.size,
       lastModified: stat.lastModified,
@@ -510,89 +546,48 @@ app.get('/sessions/:session_id/objects/:objectId/metadata', async (req, res) => 
 
 app.get('/sessions/:session_id/objects/:objectId', async (req, res) => {
   const { session_id, objectId } = req.params;
+  let objectName: string | undefined;
 
   try {
-    // List objects to find the correct file with extension
-    const stream = minioClient.listObjects(bucketName, `${session_id}/${objectId}`, true);
-    let objectName = '';
-
-    for await (const obj of stream) {
-      if (obj.name.startsWith(`${session_id}/${objectId}`) === true) {
-        objectName = obj.name;
-        break;
+    objectName = await objectResolver.resolve(session_id, objectId);
+    if (!objectName) return res.status(404).json({ error: 'File not found' });
+    let dataStream: Readable;
+    try {
+      dataStream = await minioClient.getObject(bucketName, objectName);
+    } catch (error) {
+      const missing = ['NoSuchKey', 'NotFound', 'NoSuchObject'].includes((error as { code?: string }).code ?? '');
+      if (!missing) throw error;
+      objectName = await objectResolver.recover(session_id, objectId, objectName);
+      if (!objectName) return res.status(404).json({ error: 'File not found' });
+      dataStream = await minioClient.getObject(bucketName, objectName);
+    }
+    try {
+      const headers = (dataStream as Readable & { headers?: Record<string, string> }).headers ?? {};
+      if (!headers['x-amz-meta-codeapi-version'] || !headers['x-amz-meta-original-filename']) {
+        // Preserve legacy/S3-compatible metadata behavior without promoting a
+        // later HEAD's version marker onto bytes from an earlier GET.
+        const stat = await minioClient.statObject(bucketName, objectName);
+        if (headers.etag?.replace(/^"|"$/g, '') !== stat.etag) {
+          return res.status(409).json({ error: 'Input changed during metadata lookup' });
+        }
+        for (const [key, value] of Object.entries(stat.metaData ?? {})) {
+          if (key !== 'codeapi-version') headers[`x-amz-meta-${key}`] ??= value;
+        }
       }
+      fileDownloads.inc();
+      await sendFileDownload(dataStream, res, req.header('x-codeapi-input-version'));
+    } finally {
+      dataStream.destroy();
     }
-
-    if (!objectName) {
-      logger.warn('File not found', { session_id, objectId, bucketName });
-      return res.status(404).json({
-        error: 'File not found',
-        details: 'No matching file found',
-        session_id,
-        objectId,
-        bucketName
-      });
-    }
-
-    logger.info(`[${INSTANCE_ID}] Attempting to download: ${objectName}`);
-
-    const stat: Partial<BucketItemStat> = await minioClient.statObject(bucketName, objectName);
-
-    const originalFilename = originalFilenameFromMetadata(stat.metaData);
-
-    logger.info(`[${INSTANCE_ID}] File found: ${objectName}`);
-
-    // Explicitly remove problematic headers that might be duplicated
-    res.removeHeader('Transfer-Encoding');
-    res.removeHeader('Date');
-
-    /* An object-key basename is only a storage identifier, not an original
-     * filename. If an S3-compatible backend drops user metadata, retain
-     * attachment semantics but omit the filename so the runner uses its
-     * caller-supplied destination. */
-    res.setHeader('Content-Disposition', contentDispositionForOriginalFilename(originalFilename));
-    if (stat.metaData?.['content-type'] != null) {
-      res.setHeader('Content-Type', stat.metaData['content-type']);
-    }
-    /* Surface the read-only flag on download so the sandbox can plumb it
-     * onto its in-memory file metadata without a separate metadata fetch.
-     * MinIO normalizes `X-Amz-Meta-Read-Only` to `read-only` in stat.metaData. */
-    if (stat.metaData?.['read-only'] === 'true') {
-      res.setHeader('X-Read-Only', 'true');
-    }
-
-    const dataStream = await minioClient.getObject(bucketName, objectName);
-    fileDownloads.inc();
-
-    dataStream.on('data', (chunk) => {
-      res.write(chunk);
-    });
-
-    dataStream.on('end', () => {
-      res.end();
-    });
-
-    dataStream.on('error', (err) => {
-      logger.error('Error streaming file:', { error: err, session_id, objectId, bucketName });
-      // Only send error if headers haven't been sent yet
-      if (!res.headersSent) {
-        res.status(500).json({
-          error: 'Error streaming file',
-          details: err.message
-        });
-      } else {
-        res.end();
-      }
-    });
   } catch (err) {
-    logger.error('Error downloading file:', { error: err, session_id, objectId, bucketName });
-    return res.status(500).json({
-      error: 'Error downloading file',
-      details: (err as Error | undefined)?.message,
-      session_id,
-      objectId,
-      bucketName
-    });
+    logger.error('Error downloading file', { error: err, session_id, objectId });
+    const missing = ['NoSuchKey', 'NotFound', 'NoSuchObject'].includes((err as { code?: string }).code ?? '');
+    // A locator that no longer names bytes must not shadow a replacement object
+    // published for the same identity until the index TTL expires.
+    if (missing && objectName) await forgetObjectKey(session_id, objectId, objectName);
+    if (!res.headersSent && !res.destroyed) {
+      return res.status(missing ? 404 : 500).json({ error: 'Error downloading file' });
+    }
   }
 });
 
@@ -601,16 +596,19 @@ app.get('/sessions/:session_id/objects/:objectId', async (req, res) => {
  */
 function parseObjectName(objectName: string | undefined): { session_id: string; file_id: string } | null {
   if (objectName == null || objectName === '') return null;
+  const canonicalId = canonicalObjectId(objectName);
+  if (canonicalId != null) {
+    return { session_id: objectName.split('/', 1)[0], file_id: canonicalId };
+  }
   const parts = objectName.split('/');
   if (parts.length < 2) return null;
   const session_id = parts[0];
-  const fileNameWithExt = parts[1];
-  // Remove extension to get file_id
-  const file_id = fileNameWithExt.replace(/\.[^.]+$/, '');
+  const file_id = legacyObjectId(objectName, session_id);
+  if (file_id == null) return null;
   return { session_id, file_id };
 }
 
-const detailLevels: Record<t.DetailLevel | string, (obj: BucketItem) => Promise<t.ObjectTypes | Partial<t.ObjectTypes>> | undefined> = {
+const detailLevels: Record<t.DetailLevel | string, (obj: BucketItem) => Promise<t.ObjectTypes | Partial<t.ObjectTypes>>> = {
   simple: async (obj: BucketItem): Promise<Partial<t.SimpleObject>> => obj.name ?? '',
   summary: async (obj: BucketItem): Promise<Partial<t.SummaryObject>> => ({
     name: obj.name,
@@ -664,14 +662,9 @@ app.get('/sessions/:session_id/objects', async (req, res) => {
   const { detail = 'simple' } = req.query;
 
   try {
-    const stream = minioClient.listObjects(bucketName, session_id, true);
-    const objects: (t.ObjectTypes | Partial<t.ObjectTypes> | undefined)[] = [];
-
+    const stream = minioClient.listObjects(bucketName, `${session_id}/`, true);
     const getDetail = detailLevels[detail as string] ?? detailLevels.simple;
-
-    for await (const obj of stream) {
-      objects.push(await getDetail(obj));
-    }
+    const objects = await mapObjectDetails(stream, getDetail, env.FILE_METADATA_CONCURRENCY);
 
     res.json(objects);
   } catch (err) {
@@ -684,17 +677,9 @@ app.delete('/sessions/:session_id/objects/:fileId', async (req, res) => {
   const { session_id, fileId } = req.params;
 
   try {
-    const stream = minioClient.listObjects(bucketName, `${session_id}/${fileId}`, true);
-    let objectName = '';
+    const objectNames = await objectResolver.listFresh(session_id, fileId);
 
-    for await (const obj of stream) {
-      if (obj.name.startsWith(`${session_id}/${fileId}`) === true) {
-        objectName = obj.name;
-        break;
-      }
-    }
-
-    if (!objectName) {
+    if (objectNames.length === 0) {
       logger.warn('File not found for deletion', { session_id, fileId, bucketName });
       return res.status(404).json({
         error: 'File not found',
@@ -705,8 +690,11 @@ app.delete('/sessions/:session_id/objects/:fileId', async (req, res) => {
       });
     }
 
-    await minioClient.removeObject(bucketName, objectName);
-    logger.info(`[${INSTANCE_ID}] File deleted successfully: ${objectName}`);
+    for (const objectName of objectNames) {
+      await minioClient.removeObject(bucketName, objectName);
+      await forgetObjectKey(session_id, fileId, objectName);
+    }
+    logger.info(`[${INSTANCE_ID}] File identity deleted successfully`, { session_id, fileId, objectNames });
     return res.status(200).json({
       message: 'File deleted successfully',
       session_id,
