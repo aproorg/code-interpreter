@@ -43,6 +43,12 @@ jobs:
       - name: Compose bridge configuration
         run: node tests/compose-bridge-config.cjs
 
+      - name: Release versioning
+        run: tests/release-versioning.sh
+
+      - name: Release version resolution
+        run: tests/release-version-resolution.sh
+
       - name: Validate sandbox Dockerfiles
         run: |
           docker buildx build --check -f api/Dockerfile .
@@ -139,6 +145,16 @@ jobs:
       - name: Install dependencies
         run: bun ci
 
+      - name: Install Redis for ledger integration tests
+        run: sudo apt-get update && sudo apt-get install -y redis-server
+
+      - name: Verify fleet admission with isolated Redis
+        run: |
+          redis_socket="$RUNNER_TEMP/byom-admission.sock"
+          redis-server --port 0 --unixsocket "$redis_socket" --save '' --appendonly no --daemonize yes
+          trap 'redis-cli -s "$redis_socket" shutdown nosave' EXIT
+          BRIDGE_TEST_REDIS_URL="$redis_socket" bun test src/bridge/fleet.test.ts
+
       - name: Build service
         run: bun run build
 
@@ -191,8 +207,19 @@ jobs:
           node-version: 24.16.0
       - run: npm ci
       - run: npm run build
+      - name: Selected project root containment tests
+        run: |
+          command -v rg || brew install ripgrep
+          node --test dist/root-access.test.js
+          node --test --test-name-pattern='selected command|selected replay copy|programmatic probes reject' dist/native-sandbox.test.js
+      - name: Native environment containment tests
+        run: node --test dist/environment.test.js
       - name: Native ACL and credential lifecycle tests
         run: node --test dist/macos-storage.test.js dist/private-storage.test.js dist/storage.test.js dist/github.test.js
+      - name: Native environment setup lifecycle tests
+        env:
+          LIBRECHAT_CODE_LIVE_SRT_TESTS: '1'
+        run: node --test dist/environment-live.test.js
 
   lambda-microvm-provisioning:
     name: Lambda MicroVM Provisioning

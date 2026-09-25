@@ -5,6 +5,7 @@ import type {
   BridgeAssignment,
   BridgeWorkspaceToolCapabilities,
 } from './protocol.js';
+import { workspaceIsolationKey } from './protocol.js';
 
 const capabilities: BridgeWorkspaceToolCapabilities = {
   protocolVersion: 1,
@@ -229,7 +230,8 @@ for (const cancelled of [false, true]) {
       rejectUnexecutedAssignment: () => Promise<void>;
       executeOwned: () => Promise<void>;
     };
-    internals.activeWorkspaceAssignments.set('a', {
+    const workspaceKey = workspaceIsolationKey('a');
+    internals.activeWorkspaceAssignments.set(workspaceKey, {
       id: 'previous',
       done: new Promise(() => {}),
     });
@@ -257,7 +259,10 @@ for (const cancelled of [false, true]) {
       controller.signal,
     );
     assert.equal(rejected, true);
-    assert.equal(internals.activeWorkspaceAssignments.get('a')?.id, 'previous');
+    assert.equal(
+      internals.activeWorkspaceAssignments.get(workspaceKey)?.id,
+      'previous',
+    );
   });
 }
 
@@ -281,7 +286,8 @@ test('a local cleanup handoff preserves the new assignment owner and remaining b
     executeOwned: (assignment: BridgeAssignment) => Promise<void>;
   };
   let release!: () => void;
-  internals.activeWorkspaceAssignments.set('a', {
+  const workspaceKey = workspaceIsolationKey('a');
+  internals.activeWorkspaceAssignments.set(workspaceKey, {
     id: 'previous',
     done: new Promise<void>((resolve) => {
       release = resolve;
@@ -290,7 +296,10 @@ test('a local cleanup handoff preserves the new assignment owner and remaining b
   let executed = false;
   internals.executeOwned = async (assignment) => {
     executed = true;
-    assert.equal(internals.activeWorkspaceAssignments.get('a')?.id, 'next');
+    assert.equal(
+      internals.activeWorkspaceAssignments.get(workspaceKey)?.id,
+      'next',
+    );
     assert.ok(assignment.remainingMs! < 1000 && assignment.remainingMs! > 0);
   };
   const pending = worker.executeAndSettle({
@@ -306,9 +315,65 @@ test('a local cleanup handoff preserves the new assignment owner and remaining b
   } as BridgeAssignment);
   await new Promise((resolve) => setTimeout(resolve, 5));
   assert.equal(executed, false);
-  internals.activeWorkspaceAssignments.delete('a');
+  internals.activeWorkspaceAssignments.delete(workspaceKey);
   release();
   await pending;
   assert.equal(executed, true);
   assert.equal(internals.activeWorkspaceAssignments.size, 0);
+});
+
+test('programmatic work on an independent workspace bypasses another root cleanup', async () => {
+  const worker = new BridgeWorker({
+    codeApiUrl: 'http://localhost:1',
+    token: 'fixture',
+    workerId: 'worker',
+    sandboxEndpoint: 'http://localhost:2',
+    capabilities: {
+      statefulWorkspace: false,
+      sandboxProfile: 'fixture',
+      runtimes: [],
+    },
+  });
+  const internals = worker as unknown as {
+    activeWorkspaceAssignments: Map<
+      string,
+      { id: string; done: Promise<void> }
+    >;
+    executeOwned: (assignment: BridgeAssignment) => Promise<void>;
+  };
+  const workspaceAKey = workspaceIsolationKey('a');
+  const workspaceBKey = workspaceIsolationKey('b');
+  internals.activeWorkspaceAssignments.set(workspaceAKey, {
+    id: 'previous',
+    done: new Promise(() => {}),
+  });
+  let executed = false;
+  internals.executeOwned = async () => {
+    executed = true;
+    assert.equal(
+      internals.activeWorkspaceAssignments.get(workspaceBKey)?.id,
+      'next',
+    );
+  };
+  await worker.executeAndSettle({
+    assignmentId: 'next',
+    executionKind: 'workspace_programmatic',
+    workspaceId: 'b',
+    remainingMs: 1_000,
+    request: {
+      headers: {},
+      body: {
+        language: 'bash',
+        version: '5.2',
+        session_id: 'session',
+        files: [{ name: 'main.sh', content: 'echo ready' }],
+      },
+    },
+  } as BridgeAssignment);
+  assert.equal(executed, true);
+  assert.equal(internals.activeWorkspaceAssignments.has(workspaceBKey), false);
+  assert.equal(
+    internals.activeWorkspaceAssignments.get(workspaceAKey)?.id,
+    'previous',
+  );
 });
