@@ -117,10 +117,27 @@ RUN apt-get update && \
     libpango-1.0-0 \
     libpangoft2-1.0-0 \
     libharfbuzz-subset0 \
+    # LibreOffice headless (soffice) renders office docs to PDF; tesseract is the OCR binary pytesseract needs.
+    libreoffice-impress-nogui \
+    libreoffice-writer-nogui \
+    libreoffice-calc-nogui \
+    fonts-crosextra-carlito \
+    fonts-crosextra-caladea \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    tesseract-ocr-isl \
     && rm -rf /var/lib/apt/lists/* \
     && libffi=$(find /usr/lib -name 'libffi.so.8' -print -quit) \
     && { [ -n "$libffi" ] || { echo "libffi.so.8 not found" >&2; exit 1; }; } \
     && ln -sf "$libffi" "${libffi%.so.8}.so.6"
+
+# The jail mounts /usr but not /etc, so soffice's symlinks into /etc abort
+# with a UNO RuntimeException; ship real files instead, and default the
+# profile to the session workspace (the jail's default profile path exits 77).
+RUN cp --remove-destination /etc/libreoffice/registry/main.xcd /usr/lib/libreoffice/share/registry/main.xcd \
+    && cp --remove-destination /etc/libreoffice/psprint.conf /usr/lib/libreoffice/share/psprint/psprint.conf \
+    && sed -i 's#^UserInstallation=.*#UserInstallation=file:///mnt/data/.libreoffice#' /usr/lib/libreoffice/program/bootstraprc \
+    && grep -qx 'UserInstallation=file:///mnt/data/.libreoffice' /usr/lib/libreoffice/program/bootstraprc
 
 # Restore the standard Debian `awk` -> `mawk` symlink. mawk is Priority:
 # required so its binary is in /usr/bin already, but slim base images skip
