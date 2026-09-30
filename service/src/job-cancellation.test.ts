@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { EventEmitter } from 'node:events';
+import calculateSlot from 'cluster-key-slot';
 import type IORedis from 'ioredis';
 import type { Job, QueueEvents } from 'bullmq';
 import {
@@ -62,7 +63,7 @@ class FakeRedis {
   readonly existing = new Set<string>();
   readonly deleted: string[] = [];
   readonly transactions: FakeTransaction[] = [];
-  mgetFailures = 0;
+  getFailures = 0;
   cancellationFailures = 0;
   cancellationAttempts = 0;
 
@@ -72,6 +73,10 @@ class FakeRedis {
   }
 
   async get(key: string): Promise<string | null> {
+    if (this.getFailures > 0) {
+      this.getFailures -= 1;
+      throw new Error('command connection unavailable');
+    }
     return this.existing.has(key) ? '1' : null;
   }
 
@@ -91,14 +96,6 @@ class FakeRedis {
     transaction.publish(channel, payload);
     await transaction.exec();
     return [1];
-  }
-
-  async mget(...keys: string[]): Promise<Array<string | null>> {
-    if (this.mgetFailures > 0) {
-      this.mgetFailures -= 1;
-      throw new Error('command connection unavailable');
-    }
-    return keys.map(key => (this.existing.has(key) ? '1' : null));
   }
 
   async del(key: string): Promise<number> {
@@ -263,7 +260,7 @@ test('subscriber reconnect retries durable-marker reconciliation', async () => {
   const controller = new AbortController();
   await registry.register(target, controller);
   fake.existing.add(jobCancellationInternals.cancellationKey(target));
-  fake.mgetFailures = 1;
+  fake.getFailures = 1;
 
   fake.subscriber.emit('ready');
   await new Promise(resolve => setTimeout(resolve, 150));
@@ -596,4 +593,11 @@ test('queued removal frees waiting capacity and tolerates an activation race', a
     }),
   ).toBe(false);
   expect(removals).toBe(2);
+});
+
+test('keys for one job share a Redis Cluster hash slot', () => {
+  const key = jobCancellationInternals.cancellationKey({ queueName: 'stateful-other-queue', jobId: '3q2X3EAPwWyx4u_oFIDG8' });
+  const slot = calculateSlot(key);
+  expect(calculateSlot(`${key}:result`)).toBe(slot);
+  expect(calculateSlot(`${key}:execution`)).toBe(slot);
 });
