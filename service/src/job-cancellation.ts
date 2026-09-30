@@ -1,5 +1,6 @@
 import type IORedis from 'ioredis';
 import type { Job, QueueEvents } from 'bullmq';
+import { hashTag } from './redis-connection';
 
 const JOB_CANCELLATION_PREFIX = 'codeapi:job-cancellation:v1';
 const JOB_CANCELLATION_CHANNEL = `${JOB_CANCELLATION_PREFIX}:events`;
@@ -15,10 +16,12 @@ function targetKey(target: JobTarget): string {
   return `${target.queueName}:${target.jobId}`;
 }
 
+/** Hash-tagged so each job's marker, result and execution keys share one
+ * Redis Cluster slot; the multi-key scripts below fail with CROSSSLOT otherwise. */
 function cancellationKey(target: JobTarget): string {
-  return `${JOB_CANCELLATION_PREFIX}:${encodeURIComponent(
-    target.queueName,
-  )}:${encodeURIComponent(target.jobId)}`;
+  return `${JOB_CANCELLATION_PREFIX}:${hashTag(
+    `${encodeURIComponent(target.queueName)}:${encodeURIComponent(target.jobId)}`,
+  )}`;
 }
 
 function parseTarget(raw: string): JobTarget | undefined {
@@ -137,8 +140,9 @@ export class JobCancellationRegistry {
   private async reconcile(): Promise<void> {
     const entries = [...this.controllers.values()];
     if (entries.length === 0) return;
-    const cancelled = await this.commands.mget(
-      ...entries.map(({ target }) => cancellationKey(target)),
+    // One GET per job: different jobs live in different cluster slots.
+    const cancelled = await Promise.all(
+      entries.map(({ target }) => this.commands.get(cancellationKey(target))),
     );
     cancelled.forEach((value, index) => {
       if (value === '1') {
