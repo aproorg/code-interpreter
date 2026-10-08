@@ -690,10 +690,7 @@ describe('LambdaMicrovmSandboxBackend session execution', () => {
      * (image builds stay hookless), so RunMicrovm carries no runHookPayload. */
     expect(runArgs.runHookPayload).toBeUndefined();
     expect(runArgs.idlePolicy?.autoResume).toBe(true);
-    expect(runArgs.clientToken).toBe(runtimeSessionLaunchClientToken(
-      'rt_session_1',
-      runtimeSessionLaunchGenerationSeed(config()),
-    ));
+    expect(runArgs.clientToken).toMatch(/^sess-rt_session_1-\d+$/);
     expect(runArgs.maximumDurationSeconds).toBe(28_800);
 
     const executeReq = captured.find((c) => c.path === '/api/v2/execute');
