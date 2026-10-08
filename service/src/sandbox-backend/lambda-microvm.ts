@@ -734,11 +734,6 @@ export class LambdaMicrovmSandboxBackend implements SandboxBackend {
       && error.cause.kind === 'validation';
   }
 
-  /** Both the base token and its single retry reached a terminal state and
-   * were successfully terminated, or AWS refused the token as already used and
-   * launched nothing. Keeping that PENDING intent would replay a known-dead
-   * token forever, so let the next request allocate a new generation.
-   * Ambiguous provider failures remain persisted for recovery. */
   /** AWS reports a reused idempotency token only as a generic
    * ValidationException, so the message text is the only discriminator. */
   private isClientTokenReuseRejection(error: unknown): boolean {
@@ -746,6 +741,11 @@ export class LambdaMicrovmSandboxBackend implements SandboxBackend {
       && /client ?token\b.*\bdifferent (request )?parameters/i.test((error as Error).message);
   }
 
+  /** Both the base token and its single retry reached a terminal state and
+   * were successfully terminated, or AWS refused the token as already used and
+   * launched nothing. Keeping that PENDING intent would replay a known-dead
+   * token forever, so let the next request allocate a new generation.
+   * Ambiguous provider failures remain persisted for recovery. */
   private async retireExhaustedLaunchIntent(
     launchIntent: RuntimeSessionRecord,
     lockToken: string,

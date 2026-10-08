@@ -289,11 +289,11 @@ describe('normalizeMicrovmEndpoint', () => {
 });
 
 describe('runtime session launch tokens', () => {
-  test('uses a deterministic launch namespace and stays within the AWS limit', () => {
+  test('salts every launch namespace seed and stays within the AWS limit', () => {
     const cfg = config();
     const seed = runtimeSessionLaunchGenerationSeed(cfg);
     expect(seed).toBeGreaterThanOrEqual(RUNTIME_SESSION_NAMESPACED_GENERATION_MIN);
-    expect(runtimeSessionLaunchGenerationSeed({ ...cfg, imageVersion: '4' })).not.toBe(seed);
+    expect(runtimeSessionLaunchGenerationSeed(cfg)).not.toBe(seed);
 
     const runtimeSessionId = `rt_${'a'.repeat(40)}`;
     const token = runtimeSessionLaunchClientToken(runtimeSessionId, Number.MAX_SAFE_INTEGER);
@@ -701,6 +701,7 @@ describe('LambdaMicrovmSandboxBackend session execution', () => {
     expect(record?.microvm_id).toBe([...fake.vms.keys()][0]);
     expect(record?.generation).toBeGreaterThanOrEqual(RUNTIME_SESSION_NAMESPACED_GENERATION_MIN);
     expect(record?.launch_client_token).toBe(runArgs.clientToken);
+    expect(runArgs.clientToken).toBe(runtimeSessionLaunchClientToken('rt_session_1', record?.generation as number));
   });
 
   test('replays a legacy recorded launch intent after the RunMicrovm response is lost', async () => {
