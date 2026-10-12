@@ -35,7 +35,7 @@ jobs:
         run: bash tests/package_init_runtime_rollout.sh
 
       - name: KVM guest resolver handoff
-        run: tests/kvm_guest_dns.sh
+        run: bash tests/kvm_guest_dns.sh
 
       - name: Sandbox-runner liveness checks
         run: tests/sandbox_runner_healthcheck.sh
