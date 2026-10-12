@@ -124,8 +124,8 @@ fi
 ALLOWED_PORT="${SANDBOX_ALLOWED_LOCAL_NETWORK_PORT:-0}"
 
 # NsJail runs sandboxed processes as inside UID 65534 (nobody), mapped to a
-# per-job outside UID by the sandbox API. The proxy socket remains mounted
-# into each jail, so it does not need per-UID ownership.
+# per-job outside UID by the sandbox API. Authorized tool-call invocations
+# receive two anonymous pipe ends; no socket path is mounted into a jail.
 SANDBOX_UID=65534
 
 # Extract API port from bind address (default 2000)
@@ -137,11 +137,11 @@ if [ "$ALLOWED_PORT" -gt 0 ] 2>/dev/null; then
         exit 1
     fi
 
-    echo "Tool-call socket forwarding enabled for UID $SANDBOX_UID (port $ALLOWED_PORT)"
+    echo "Tool-call pipe forwarding enabled for UID $SANDBOX_UID (port $ALLOWED_PORT)"
     # Do not start Node here. Lambda MicroVM image creation snapshots this
     # already-running container, and the official Node binary embeds OpenSSL.
-    # The API starts and awaits the narrow Unix-socket proxy only after a
-    # post-restore /execute is authorized for tool calls.
+    # The API starts a per-invocation pipe broker only after a post-restore
+    # /execute is authorized for tool calls.
 fi
 
 # Package permissions are finalized by package-init when the PVC is populated.
@@ -179,7 +179,7 @@ if [ "$SANDBOX_USE_CGROUPV2" = "true" ]; then
     NSJAIL_CGROUP_ARGS=(--use_cgroupv2)
 fi
 
-if timeout 10 "${NSJAIL_PATH:-/usr/sbin/nsjail}" --config "${NSJAIL_CONFIG:-/sandbox_api/config/sandbox.cfg}" \
+if timeout 10 /usr/local/bin/sandbox-supervisor-policy "${NSJAIL_PATH:-/usr/sbin/nsjail}" --config "${NSJAIL_CONFIG:-/sandbox_api/config/sandbox.cfg}" \
     "${NSJAIL_CGROUP_ARGS[@]}" --log "$SMOKE_LOG" \
     --user "65534:${SMOKE_OUTSIDE_UID}:1" --group "65534:${SMOKE_OUTSIDE_GID}:1" \
     -s /usr/bin:/bin -s /usr/lib:/lib -s /usr/lib64:/lib64 \
@@ -203,4 +203,4 @@ rm -rf "$SMOKE_DIR"
 
 echo "Starting sandbox API server..."
 # Absolute path: the Lambda MicroVM guest does not carry the image PATH.
-exec /usr/local/bin/bun run /sandbox_api/.build/index.js
+exec /usr/local/bin/sandbox-supervisor-policy /usr/local/bin/bun run /sandbox_api/.build/index.js
