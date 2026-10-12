@@ -20,8 +20,8 @@ import type {
 import logger from './logger';
 import { redisKeepAliveOptions, redisReconnectDelay } from './redis-options';
 import { bullmqQueueJobs, registerBullmqQueueMetricsCollector } from './metrics';
-import { bullmqPrefix } from './redis-connection';
 import { JobCancellationRegistry } from './job-cancellation';
+import { bullmqPrefix } from './redis-connection';
 
 const retryStrategy: CommonRedisOptions['retryStrategy'] = (times) => {
   logger.warn(`Retrying Redis connection attempt ${times}`);

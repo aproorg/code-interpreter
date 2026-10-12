@@ -50,11 +50,11 @@ import {
   validateQueuedExecutionProfile,
   validateQueuedSandboxBackend,
 } from './execution-profile';
-import { bullmqPrefix } from './redis-connection';
 import {
   BRIDGE_WORKSPACE_PROGRAMMATIC_MAX_FILE_BYTES,
   programmaticTransferReserveMs,
 } from '../../packages/code/src/protocol';
+import { bullmqPrefix } from './redis-connection';
 
 const { INSTANCE_ID } = env;
 const WORKER_ID = `${INSTANCE_ID}-${process.pid}`;
