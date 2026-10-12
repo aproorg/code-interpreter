@@ -58,6 +58,30 @@ export async function createMinioClient(): Promise<Client> {
     });
   }
 
+  if (!process.env.MINIO_ACCESS_KEY) {
+    /** No static pair and no IRSA: use the AWS SDK default chain, which supports
+     * ECS task roles as well as EC2 instance profiles, environment, and profiles. */
+    logger.info('Using the AWS SDK default credential chain for MinIO/S3 authentication', {
+      region: baseConfig.region,
+    });
+    const { S3Client } = await import('@aws-sdk/client-s3');
+    const sdk = new S3Client({ region: baseConfig.region });
+    const credentialsProvider = {
+      async getCredentials() {
+        const c = await sdk.config.credentials();
+        return {
+          getAccessKey: () => c.accessKeyId,
+          getSecretKey: () => c.secretAccessKey,
+          getSessionToken: () => c.sessionToken,
+        };
+      },
+    };
+    return new Client({
+      ...baseConfig,
+      credentialsProvider: credentialsProvider as unknown as ClientOptions['credentialsProvider'],
+    });
+  }
+
   logger.info('Using explicit credentials for MinIO/S3 authentication');
   return new Client({
     ...baseConfig,

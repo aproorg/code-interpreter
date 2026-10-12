@@ -29,11 +29,11 @@ the sandbox-runner service and grants the explicit capability set instead:
 ```bash
 # Baseline (privileged: true)
 docker compose -f docker-compose.local-dev.yml up -d
-./test-sandbox.sh
+bash ./test-sandbox.sh
 
 # Capability-restricted (no privileged, explicit caps)
 docker compose -f docker-compose.local-dev.yml -f your-capability-overlay.yml up -d
-./test-sandbox.sh
+bash ./test-sandbox.sh
 ```
 
 **Note:** AppArmor profiles require native Linux with AppArmor enabled. WSL2 and Docker Desktop do not support AppArmor. The capability-restricted mode works without AppArmor.
@@ -49,7 +49,7 @@ minikube start --cpus=4 --memory=8192
 
 # Port forward and test
 kubectl port-forward deploy/codeapi-worker-sandbox 2000:2000
-./test-sandbox.sh
+bash ./test-sandbox.sh
 ```
 
 ## Kubernetes Deployment with AppArmor
