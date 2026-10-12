@@ -5,7 +5,7 @@
 # Works on both arm64 (Apple Silicon) and amd64 (Linux/WSL).
 #
 # Usage:
-#   ./build-packages.sh              # Build all packages
+#   bash ./build-packages.sh         # Build all packages
 #
 # Environment Variables:
 #   PYTHON_VERSION=3.14.4    # Python version to install
