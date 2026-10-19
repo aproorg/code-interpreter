@@ -380,6 +380,7 @@ export class HostedAppMicrovmRuntime {
           token = await this.mintToken(vm.microvmId, this.config.controlPort, callerSignal);
         }
         const response = await this.deps.fetch(`${endpoint}/api/v2/health`, {
+          redirect: 'error',
           headers: {
             [token.headerName]: token.token,
             ...microvmPortHeaders(this.config.controlPort),
@@ -417,6 +418,7 @@ export class HostedAppMicrovmRuntime {
       `${normalizeHostedAppMicrovmEndpoint(vm.endpoint ?? '')}/api/v2/hosted-app/start`,
       {
         method: 'POST',
+        redirect: 'error',
         headers: {
           [token.headerName]: token.token,
           ...microvmPortHeaders(this.config.controlPort),
@@ -457,6 +459,7 @@ export class HostedAppMicrovmRuntime {
     const response = await this.deps.fetch(
       `${normalizeHostedAppMicrovmEndpoint(vm.endpoint ?? '')}/api/v2/hosted-app/status`,
       {
+        redirect: 'error',
         headers: {
           [token.headerName]: token.token,
           ...microvmPortHeaders(this.config.controlPort),
