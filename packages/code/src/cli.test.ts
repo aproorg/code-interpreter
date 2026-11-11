@@ -7,6 +7,18 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
+test('CLI help presents lc-code as primary and retains the compatibility alias', () => {
+  const result = spawnSync(
+    process.execPath,
+    [fileURLToPath(new URL('./cli.js', import.meta.url)), '--help'],
+    { encoding: 'utf8', timeout: 5000 },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /^Usage: lc-code <command>/);
+  assert.match(result.stdout, /Run lc-code setup --help/);
+  assert.match(result.stdout, /librechat-code remains available as a compatibility alias/);
+});
+
 test('CLI rejects an invalid worker ID before entering the run loop', () => {
   const result = spawnSync(
     process.execPath,
@@ -356,6 +368,35 @@ test('CLI rejects checkout routing outside a trusted VM or without repository-sc
   });
   assert.notEqual(invalid.status, 0);
   assert.match(invalid.stderr, /must be admitted or checkout/);
+});
+
+test('CLI permits installation-scoped GitHub tokens only for a trusted VM with routed App auth', () => {
+  const cli = fileURLToPath(new URL('./cli.js', import.meta.url));
+  const base = {
+    ...process.env,
+    LIBRECHAT_CODE_URL: 'http://127.0.0.1:1/v1',
+    LIBRECHAT_CODE_WORKER_TOKEN: 'worker-secret',
+    LIBRECHAT_CODE_WORKER_ID: 'engineering-vm',
+    LIBRECHAT_CODE_WORKER_DIR: process.cwd(),
+    LIBRECHAT_CODE_ALLOW_WORKSPACE_COMMANDS: 'true',
+    LIBRECHAT_CODE_GITHUB_TOKEN: undefined,
+    LIBRECHAT_CODE_GITHUB_APP_ID: '123',
+    LIBRECHAT_CODE_GITHUB_PRIVATE_KEY_FILE: '/does/not/matter',
+    LIBRECHAT_CODE_GITHUB_INSTALLATION_ID: undefined,
+    LIBRECHAT_CODE_GITHUB_TOKEN_SCOPE: 'installation',
+  };
+  const restricted = spawnSync(process.execPath, [cli], { encoding: 'utf8', env: base });
+  assert.match(restricted.stderr, /Installation-scoped GitHub tokens require the trusted-vm/);
+  const trusted = spawnSync(process.execPath, [cli], {
+    encoding: 'utf8',
+    env: { ...base, LIBRECHAT_CODE_COMMAND_POLICY_PRESET: 'trusted-vm' },
+  });
+  assert.doesNotMatch(trusted.stderr, /Installation-scoped GitHub tokens require/);
+  const fixed = spawnSync(process.execPath, [cli], {
+    encoding: 'utf8',
+    env: { ...base, LIBRECHAT_CODE_GITHUB_INSTALLATION_ID: '456' },
+  });
+  assert.match(fixed.stderr, /without a fixed installation ID/);
 });
 
 test('CLI requires a runtime image for Docker supervision', () => {
